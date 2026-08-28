@@ -59,6 +59,20 @@ def ok(cond, label):
         FAILURES.append(label)
 
 
+def feed(qs=""):
+    """The listings feed is paginated now: {total, items:[summary…]}."""
+    return c.get(f"/listings?{qs}" if qs else "/listings").get_json()["items"]
+
+
+def feed_total(qs=""):
+    return c.get(f"/listings?{qs}" if qs else "/listings").get_json()["total"]
+
+
+def full(listing_id):
+    """The complete record, which the summary feed deliberately omits."""
+    return c.get(f"/listings/{listing_id}").get_json()
+
+
 HDR_INGEST = {"X-Ingest-Token": "ingesttok"}
 HDR_ADMIN = {"X-Admin-Token": "admintok"}
 HDR_HOOK = {"X-Telegram-Bot-Api-Secret-Token": "whsecret"}
@@ -109,9 +123,10 @@ body = r.get_json()
 ok(r.status_code == 200, f"POST /internal/ingest -> {r.status_code}")
 ok(body["published"] == 2, f"published immediately: {body}")
 
-pub = c.get("/listings").get_json()
+pub = feed()
 ok(len(pub) == 2, f"visible on the map right away without moderation ({len(pub)})")
-ok(all(l["source_url"].startswith("https://t.me/") for l in pub), "every listing keeps its source link")
+ok(all(full(l["id"])["source_url"].startswith("https://t.me/") for l in pub),
+   "every listing keeps its source link")
 ok(pub[0]["lat"] != pub[1]["lat"], "fallback coords jittered so markers don't overlap")
 
 print("\n=== 3. Extractor output on those posts ===")
@@ -121,7 +136,8 @@ nt = by_city.get("nha_trang", {})
 ok(dn.get("price_min_usd") == 800, f"USD preferred over VND -> {dn.get('price_min_usd')}")
 ok(dn.get("rooms") == "2" and dn.get("area_sqm") == 70, f"rooms/area -> {dn.get('rooms')}/{dn.get('area_sqm')}")
 ok(dn.get("pets_policy") == "not_allowed", f"pets -> {dn.get('pets_policy')}")
-ok(len(dn.get("photos", [])) == 3, f"all 3 photos kept -> {len(dn.get('photos', []))}")
+ok(full(dn["id"])["photos"] and len(full(dn["id"])["photos"]) == 3,
+   "all 3 photos kept")
 ok(nt.get("rooms") == "studio" and nt.get("price_min_usd") == 350, "studio in Nha Trang parsed")
 
 print("\n=== 4. Quality gates hold back what a human would have rejected ===")
@@ -136,7 +152,7 @@ junk = {"channel_username": "danangrentaflat", "posts": [
 ]}
 r = c.post("/internal/ingest", json=junk, headers=HDR_INGEST).get_json()
 ok(r["held"] == 3 and r["published"] == 0, f"wanted-ad / non-listing / too-short all held: {r}")
-ok(len(c.get("/listings").get_json()) == 2, "held items never reached the map")
+ok(len(feed()) == 2, "held items never reached the map")
 
 print("\n=== 5. Suspiciously cheap listing publishes but is flagged ===")
 cheap = {"channel_username": "danangrentaflat", "posts": [
@@ -161,7 +177,7 @@ old = {"channel_username": "danangrentaflat", "posts": [
                                  "balcony, parking available, minimum 6 months contract.",
      "photo_urls": [], "posted_at": recent(days_ago=200)}]}
 c.post("/internal/ingest", json=old, headers=HDR_INGEST)
-urls = [l["source_url"] for l in c.get("/listings").get_json()]
+urls = [full(l["id"])["source_url"] for l in feed()]
 ok(not any("4001" in u for u in urls), "a 200-day-old post is not shown as current")
 
 print("\n=== 8. Multi-select filters ===")
@@ -174,11 +190,11 @@ cases = [
     ("city=bogus", 3), ("rooms=99", 3),
 ]
 for qs, expected in cases:
-    got = len(c.get(f"/listings?{qs}").get_json())
+    got = feed_total(qs)
     ok(got == expected, f"?{qs} -> {got} (expected {expected})")
 
 print("\n=== 8b. Sorting ===")
-prices = lambda qs: [l["price_min_usd"] for l in c.get(f"/listings?{qs}").get_json()]
+prices = lambda qs: [l["price_min_usd"] for l in feed(qs)]
 asc = prices("sort=price_asc")
 desc = prices("sort=price_desc")
 priced = [p for p in asc if p is not None]
@@ -187,11 +203,71 @@ ok([p for p in desc if p is not None] == sorted(priced, reverse=True), f"price_d
 # A listing with no price answers neither "cheapest" nor "dearest", so it must
 # not float to the top of either ordering.
 ok(all(p is not None for p in asc[:len(priced)]), "unpriced listings sort last, not first")
-ok(len(c.get("/listings?sort=bogus").get_json()) == len(c.get("/listings").get_json()),
+ok(len(feed("sort=bogus")) == len(feed()),
    "an unknown sort falls back instead of erroring")
-areas = [l["area_sqm"] for l in c.get("/listings?sort=area_desc").get_json()]
+areas = [l["area_sqm"] for l in feed("sort=area_desc")]
 known = [a for a in areas if a is not None]
 ok(known == sorted(known, reverse=True), f"area_desc descending: {areas}")
+
+print("\n=== 8c. Feed shape and the map endpoint ===")
+r = c.get("/listings?limit=1").get_json()
+ok(set(r) == {"total", "offset", "limit", "items"}, f"feed is paginated: {sorted(r)}")
+ok(len(r["items"]) == 1 and r["total"] >= 1, f"limit honoured: {len(r['items'])} of {r['total']}")
+# The feed used to send the full record for every listing (~6KB each), which
+# timed the server out once there were a few hundred.
+summary = r["items"][0]
+ok("description" not in summary and "photos" not in summary,
+   f"summary omits the heavy fields: {sorted(summary)}")
+ok("thumb" in summary and "photo_count" in summary, "summary carries a thumbnail instead")
+
+pts = c.get("/map/points").get_json()
+ok(isinstance(pts, list) and all(set(p) == {"id", "lat", "lng", "price", "approx"} for p in pts),
+   f"map points are minimal: {pts[:1]}")
+ok(all(p["lat"] is not None for p in pts), "map points always have coordinates")
+# Map and feed must agree, or a pin contradicts the list it came from.
+ok(len(c.get("/map/points?city=nha_trang").get_json()) == feed_total("city=nha_trang"),
+   "map and feed apply the same filters")
+
+print("\n=== 8d. Per-user saved / viewed ===")
+import hashlib
+import hmac
+import json as _json
+import time as _time
+from urllib.parse import urlencode
+
+
+def init_data(uid):
+    fields = {"auth_date": str(int(_time.time())),
+              "user": _json.dumps({"id": uid, "first_name": "T"}, separators=(",", ":"))}
+    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+    secret = hmac.new(b"WebAppData", b"test:token", hashlib.sha256).digest()
+    return urlencode({**fields, "hash": hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()})
+
+
+lid = feed()[0]["id"]
+H_A = {"X-Telegram-Init-Data": init_data(1111)}
+H_B = {"X-Telegram-Init-Data": init_data(2222)}
+
+ok(c.get("/me/listings").status_code == 403, "no init data -> 403")
+ok(c.get("/me/listings", headers={"X-Telegram-Init-Data": "user=x&hash=bad"}).status_code == 403,
+   "forged init data -> 403")
+
+c.post(f"/me/listings/{lid}/saved", headers=H_A, json={"on": True})
+c.post(f"/me/listings/{lid}/viewed", headers=H_A, json={"on": True})
+state_a = c.get("/me/listings", headers=H_A).get_json()
+state_b = c.get("/me/listings", headers=H_B).get_json()
+ok(state_a["saved"] == [lid] and state_a["viewed"] == [lid], f"own state stored: {state_a}")
+# What one person has seen says nothing about anyone else.
+ok(state_b["saved"] == [] and state_b["viewed"] == [], f"another user is unaffected: {state_b}")
+
+c.post(f"/me/listings/{lid}/saved", headers=H_A, json={"on": False})
+ok(c.get("/me/listings", headers=H_A).get_json()["saved"] == [], "unsaving works")
+ok(c.post(f"/me/listings/{lid}/bogus", headers=H_A, json={"on": True}).status_code == 404,
+   "unknown state rejected")
+ok(c.post("/me/listings/999999/saved", headers=H_A, json={"on": True}).status_code == 404,
+   "unknown listing rejected")
+# Per-user state must never leak into the public feed.
+ok("saved" not in summary and "viewed" not in summary, "public feed carries no per-user state")
 
 print("\n=== 9. Security ===")
 ok(c.post("/bot/webhook", json={"update_id": 1, "message": {}}).status_code == 403,
@@ -201,9 +277,9 @@ ok(c.get("/admin/listings/pending", headers={"X-Admin-Token": "wrong"}).status_c
 ok(c.post("/internal/ingest", json=payload, headers={"X-Ingest-Token": "wrong"}).status_code == 403,
    "bad ingest token -> 403")
 
-before = len(c.get("/listings").get_json())
+before = len(feed())
 callback("reject:1", user=99999)
-ok(len(c.get("/listings").get_json()) == before, "non-admin cannot moderate")
+ok(len(feed()) == before, "non-admin cannot moderate")
 
 print("\n=== 10. Bot menu, i18n and language switching ===")
 SENT.clear()
@@ -280,7 +356,7 @@ ok(any(cid == ADMIN for _, cid, _ in SENT), "admin notified about the submission
 
 sub_id = pending[0]["id"]
 callback(f"approve:{sub_id}")
-ok(any(l["id"] == sub_id for l in c.get("/listings").get_json()), "approving publishes it")
+ok(any(l["id"] == sub_id for l in feed()), "approving publishes it")
 
 print("\n=== 15. Robustness ===")
 for bad in ["", "approve", "approve:abc", "drop:1", "approve:1:2", "lang:klingon"]:

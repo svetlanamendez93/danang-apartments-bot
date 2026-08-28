@@ -20,7 +20,53 @@ const CITY_CENTERS = {
 let map;
 let markerLayer;
 let currentListings = [];
+let currentMapPoints = [];
 let currentSort = "newest";
+
+// Saved and already-seen listings, kept per person on the server. Identity is
+// Telegram's signed initData, so one person's shortlist is never another's.
+const userState = { saved: new Set(), viewed: new Set(), ready: false };
+const initData = window.Telegram?.WebApp?.initData || "";
+
+// Which subset the list is showing: everything, only saved, or only seen.
+let currentTab = "all";
+
+async function api(path, options = {}) {
+  return fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: { "Content-Type": "application/json",
+               "X-Telegram-Init-Data": initData, ...(options.headers || {}) },
+  });
+}
+
+async function loadUserState() {
+  if (!initData) return; // opened outside Telegram: no identity, no per-user state
+  try {
+    const res = await api("/me/listings");
+    if (!res.ok) return;
+    const data = await res.json();
+    userState.saved = new Set(data.saved);
+    userState.viewed = new Set(data.viewed);
+    userState.ready = true;
+  } catch (err) {
+    console.error("loadUserState failed:", err);
+  }
+}
+
+async function setUserState(listingId, state, on) {
+  const set = userState[state === "saved" ? "saved" : "viewed"];
+  if (on) set.add(listingId);
+  else set.delete(listingId);
+  if (!initData) return;
+  try {
+    await api(`/me/listings/${listingId}/${state}`, {
+      method: "POST",
+      body: JSON.stringify({ on }),
+    });
+  } catch (err) {
+    console.error("setUserState failed:", err);
+  }
+}
 
 const SORT_OPTIONS = ["newest", "price_asc", "price_desc", "area_desc"];
 // Multi-select state: which values are ticked in each filter group.
@@ -132,15 +178,30 @@ function currentFilters() {
 
 // --- data ---------------------------------------------------------------------
 
-async function loadListings() {
-  const status = document.getElementById("resultCount");
-  status.textContent = t("loading");
+// The feed is paginated and carries only what a card shows; the map gets a
+// separate, far lighter endpoint. Sending the full record for every listing
+// made the response hundreds of kilobytes and timed the server out once there
+// were a few hundred of them.
+const PAGE_SIZE = 60;
+let listOffset = 0;
+let listTotal = 0;
 
-  let listings;
+async function loadListings(append = false) {
+  const status = document.getElementById("resultCount");
+  if (!append) {
+    listOffset = 0;
+    status.textContent = t("loading");
+  }
+
+  const params = currentFilters();
+  params.set("limit", PAGE_SIZE);
+  params.set("offset", listOffset);
+
+  let data;
   try {
-    const res = await fetch(`${API_BASE_URL}/listings?${currentFilters().toString()}`);
+    const res = await fetch(`${API_BASE_URL}/listings?${params.toString()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    listings = await res.json();
+    data = await res.json();
   } catch (err) {
     // Without this the page looks identical to "no matches", which hides real
     // outages from the user.
@@ -149,47 +210,61 @@ async function loadListings() {
     return;
   }
 
-  currentListings = listings;
-  renderMarkers(listings);
-  renderList(listings);
-
-  const cities = [...selected.city];
-  if (cities.length === 1 && CITY_CENTERS[cities[0]]) {
-    map.setView(CITY_CENTERS[cities[0]], 13);
-  } else {
-    // Listings span cities hundreds of km apart, so a fixed view on one city
-    // hides most of them — without this the map looked almost empty.
-    const points = listings
-      .filter((l) => l.lat != null && l.lng != null)
-      .map((l) => [l.lat, l.lng]);
-    if (points.length) {
-      map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 14 });
-    }
-  }
-
-  status.textContent = listings.length
-    ? `${listings.length} ${t("results")}`
+  listTotal = data.total;
+  currentListings = append ? currentListings.concat(data.items) : data.items;
+  renderList(currentListings);
+  status.textContent = listTotal
+    ? `${listTotal} ${t("results")}`
     : t("nothing_found");
+
+  if (!append) loadMapPoints();
 }
 
-function renderMarkers(listings) {
+async function loadMapPoints() {
+  try {
+    const res = await fetch(`${API_BASE_URL}/map/points?${currentFilters().toString()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const points = await res.json();
+    currentMapPoints = points;
+    renderMarkers(points);
+
+    const cities = [...selected.city];
+    if (cities.length === 1 && CITY_CENTERS[cities[0]]) {
+      map.setView(CITY_CENTERS[cities[0]], 13);
+    } else if (points.length) {
+      // Listings span cities hundreds of km apart, so a fixed view on one city
+      // hides most of them.
+      map.fitBounds(L.latLngBounds(points.map((p) => [p.lat, p.lng])), {
+        padding: [40, 40],
+        maxZoom: 14,
+      });
+    }
+  } catch (err) {
+    console.error("loadMapPoints failed:", err);
+  }
+}
+
+function renderMarkers(points) {
   markerLayer.clearLayers();
-  listings.forEach((listing) => {
-    if (listing.lat == null || listing.lng == null) return;
-    const label = listing.price_min_usd == null ? "?" : "$" + Math.round(listing.price_min_usd);
+  points.forEach((p) => {
+    if (p.lat == null || p.lng == null) return;
+    const label = p.price == null ? "?" : "$" + p.price;
     // A pin for a listing whose address we could not identify must not look
     // like a precise one — otherwise a guessed position reads as a real
     // address and the map looks simply wrong.
-    const approx = listing.location_is_approximate;
-    const marker = L.marker([listing.lat, listing.lng], {
-      listingPrice: listing.price_min_usd,
+    const seen = userState.viewed.has(p.id);
+    const cls = ["price-pin", p.approx ? "approx" : "", seen ? "seen" : ""].join(" ").trim();
+    const marker = L.marker([p.lat, p.lng], {
+      listingPrice: p.price,
       icon: L.divIcon({
-        className: approx ? "price-pin approx" : "price-pin",
-        html: `<span>${approx ? "≈" : ""}${escapeHtml(label)}</span>`,
+        className: cls,
+        html: `<span>${p.approx ? "≈" : ""}${escapeHtml(label)}</span>`,
         iconSize: null,
       }),
     });
-    marker.on("click", () => openListing(listing));
+    // The map carries only ids and positions now, so the full record is
+    // fetched when a pin is actually opened.
+    marker.on("click", () => openListingById(p.id));
     markerLayer.addLayer(marker);
   });
 }
@@ -226,6 +301,58 @@ function makeClusterLayer() {
   });
 }
 
+async function loadTab(tab) {
+  currentTab = tab;
+  const status = document.getElementById("resultCount");
+  const view = document.getElementById("listView");
+
+  if (tab === "all") {
+    document.getElementById("sortSelect").classList.remove("hidden");
+    loadListings();
+    return;
+  }
+
+  // A personal set is not something the public feed can filter on, so these
+  // are fetched by id.
+  document.getElementById("sortSelect").classList.add("hidden");
+  const ids = [...(tab === "saved" ? userState.saved : userState.viewed)];
+  if (!ids.length) {
+    currentListings = [];
+    view.innerHTML = `<p class="empty">${tab === "saved" ? t("nothing_saved") : t("nothing_viewed")}</p>`;
+    status.textContent = `0 ${t("results")}`;
+    return;
+  }
+
+  status.textContent = t("loading");
+  const results = await Promise.all(
+    ids.map((id) =>
+      detailCache.has(id)
+        ? Promise.resolve(detailCache.get(id))
+        : fetch(`${API_BASE_URL}/listings/${id}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((l) => { if (l) detailCache.set(id, l); return l; })
+            .catch(() => null)
+    )
+  );
+
+  // A listing can expire or be withdrawn while it sits in someone's shortlist.
+  currentListings = results.filter(Boolean).map(toSummary);
+  listTotal = currentListings.length;
+  renderList(currentListings);
+  status.textContent = `${listTotal} ${t("results")}`;
+}
+
+// The detail endpoint returns the full record; the card renderer wants the
+// summary shape, so bridge the two rather than duplicating the card markup.
+function toSummary(listing) {
+  const photos = listing.photos || [];
+  return {
+    ...listing,
+    thumb: photos.length ? photos[0].url : null,
+    photo_count: photos.length,
+  };
+}
+
 function renderList(listings) {
   const view = document.getElementById("listView");
   view.innerHTML = "";
@@ -235,30 +362,73 @@ function renderList(listings) {
   }
 
   listings.forEach((listing) => {
+    const seen = userState.viewed.has(listing.id);
+    const saved = userState.saved.has(listing.id);
     const card = document.createElement("article");
-    card.className = "card";
-    const thumb = listing.photos?.[0]?.url;
+    card.className = "card" + (seen ? " seen" : "");
     card.innerHTML = `
       <div class="card-thumb">${
-        thumb
-          ? `<img src="${escapeHtml(thumb)}" loading="lazy" alt="" />`
+        listing.thumb
+          ? `<img src="${escapeHtml(listing.thumb)}" loading="lazy" alt="" />`
           : `<div class="no-photo-sm">${t("no_photo")}</div>`
-      }${listing.photos?.length > 1 ? `<span class="photo-count">📷 ${listing.photos.length}</span>` : ""}</div>
+      }${listing.photo_count > 1 ? `<span class="photo-count">📷 ${listing.photo_count}</span>` : ""}</div>
       <div class="card-body">
-        <div class="card-price">${escapeHtml(priceLabel(listing))}</div>
+        <div class="card-price">${escapeHtml(priceLabel(listing))}${
+          seen ? `<span class="seen-tag">${t("seen")}</span>` : ""
+        }</div>
         <div class="card-facts">${factsFor(listing).map(escapeHtml).join(" · ")}</div>
         <div class="card-city">📍 ${escapeHtml(optLabel("city", listing.city))}${
           listing.address_text ? ", " + escapeHtml(listing.address_text) : ""
         }</div>
-      </div>`;
-    card.onclick = () => openListing(listing);
+      </div>
+      <button class="fav-btn${saved ? " on" : ""}" aria-label="save">${saved ? "★" : "☆"}</button>`;
+
+    card.querySelector(".fav-btn").onclick = (e) => {
+      e.stopPropagation();   // saving must not also open the card
+      setUserState(listing.id, "saved", !userState.saved.has(listing.id));
+      renderList(currentListings);
+    };
+    card.onclick = () => openListingById(listing.id);
     view.appendChild(card);
   });
+
+  if (currentTab === "all" && currentListings.length < listTotal) {
+    const more = document.createElement("button");
+    more.className = "load-more";
+    more.textContent = t("load_more");
+    more.onclick = () => {
+      listOffset += PAGE_SIZE;
+      loadListings(true);
+    };
+    view.appendChild(more);
+  }
 }
 
 // --- listing detail -----------------------------------------------------------
 
+const detailCache = new Map();
+
+async function openListingById(id) {
+  if (detailCache.has(id)) return openListing(detailCache.get(id));
+  try {
+    const res = await fetch(`${API_BASE_URL}/listings/${id}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const listing = await res.json();
+    detailCache.set(id, listing);
+    openListing(listing);
+  } catch (err) {
+    console.error("openListingById failed:", err);
+  }
+}
+
 function openListing(listing) {
+  // Opening a card is what "viewed" means, so mark it here rather than making
+  // it a separate action the user has to remember.
+  if (!userState.viewed.has(listing.id)) {
+    setUserState(listing.id, "viewed", true);
+    renderList(currentListings);
+    if (currentMapPoints.length) renderMarkers(currentMapPoints);
+  }
   const gallery = document.getElementById("gallery");
   const dots = document.getElementById("galleryDots");
   gallery.innerHTML = "";
@@ -601,6 +771,19 @@ function init() {
     document.getElementById(id).oninput = updateFilterBadge;
   });
 
+  document.querySelectorAll("#tabBar button").forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll("#tabBar button").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      // The saved and viewed tabs are lists of specific flats, so the map view
+      // would show a near-empty map; switch to the list for them.
+      if (btn.dataset.tab !== "all") {
+        document.querySelector('#viewToggle button[data-view="list"]').click();
+      }
+      loadTab(btn.dataset.tab);
+    };
+  });
+
   document.querySelectorAll("#viewToggle button").forEach((btn) => {
     btn.onclick = () => {
       document.querySelectorAll("#viewToggle button").forEach((b) => b.classList.remove("active"));
@@ -613,7 +796,7 @@ function init() {
     };
   });
 
-  loadListings();
+  loadUserState().then(() => loadListings());
 }
 
 init();

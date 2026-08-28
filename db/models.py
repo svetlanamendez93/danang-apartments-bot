@@ -129,12 +129,14 @@ class Listing(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
-    status: Mapped[ListingStatus] = mapped_column(Enum(ListingStatus), default=ListingStatus.PENDING)
+    status: Mapped[ListingStatus] = mapped_column(
+        Enum(ListingStatus), default=ListingStatus.PENDING, index=True
+    )
 
     # Источник — ссылка на оригинал всегда хранится и всегда показывается в Mini App.
     source_type: Mapped[SourceType] = mapped_column(Enum(SourceType))
     source_channel: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    source_url: Mapped[str] = mapped_column(String(1024))
+    source_url: Mapped[str] = mapped_column(String(1024), index=True)
     source_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Локация

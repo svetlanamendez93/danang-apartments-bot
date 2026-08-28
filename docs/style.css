@@ -674,3 +674,81 @@ body {
 /* The library ships its own cluster look; ours replaces it entirely. */
 .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background: none; }
 .marker-cluster-small div, .marker-cluster-medium div, .marker-cluster-large div { background: none; }
+
+
+/* --- tabs, viewed state, favourites --- */
+
+#tabBar {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  background: var(--bg);
+  position: relative;
+  z-index: var(--z-over-map);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#tabBar::-webkit-scrollbar { display: none; }
+
+#tabBar button {
+  border: 0;
+  background: transparent;
+  color: var(--hint);
+  padding: 8px 12px;
+  font-size: 14px;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+
+#tabBar button.active {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+/* Already-seen listings stay visible but recede, so the eye lands on what is
+   still new without the list shrinking as you browse. */
+.card.seen { opacity: 0.55; }
+.card.seen .card-price { font-weight: 600; }
+
+.seen-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--hint);
+  vertical-align: middle;
+}
+
+.card { position: relative; }
+
+.fav-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.fav-btn.on { color: #ffc94d; }
+
+.price-pin.seen span { opacity: 0.5; }
+
+.load-more {
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  font-size: 14px;
+  cursor: pointer;
+}

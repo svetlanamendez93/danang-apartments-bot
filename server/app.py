@@ -25,6 +25,7 @@ load_dotenv(_ENV_PATH)
 
 from flask import Flask, jsonify, request, send_from_directory
 from sqlalchemy import func
+from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import Forbidden, NotFound
 
@@ -215,6 +216,40 @@ def _resolve_position(
     return fallback_lat, fallback_lng, True
 
 
+def listing_summary(listing: Listing) -> dict:
+    """The fields a card in the list or a pin on the map needs — and no more.
+
+    The full record averages ~6KB, mostly description text and photo URLs, so
+    returning it for every listing made the feed hundreds of kilobytes and took
+    the free-tier server over its time limit once there were a few hundred
+    listings. Opening a card fetches the rest from /listings/<id>.
+    """
+    first_photo = min(listing.photos, key=lambda p: p.position, default=None)
+    return {
+        "id": listing.id,
+        "city": listing.city.value,
+        "address_text": listing.address_text,
+        "lat": listing.lat,
+        "lng": listing.lng,
+        "location_is_approximate": listing.location_is_approximate,
+        "price_min_usd": listing.price_min_usd,
+        "price_max_usd": listing.price_max_usd,
+        "rooms": listing.rooms,
+        "property_type": listing.property_type.value if listing.property_type else None,
+        "renovation_quality": listing.renovation_quality.value if listing.renovation_quality else None,
+        "pets_policy": listing.pets_policy.value,
+        "area_sqm": listing.area_sqm,
+        "sea_distance_m": listing.sea_distance_m,
+        "price_per_sqm_usd": (
+            round(listing.price_min_usd / listing.area_sqm, 1)
+            if listing.price_min_usd and listing.area_sqm else None
+        ),
+        "photo_count": len(listing.photos),
+        "thumb": photo_url(first_photo.url) if first_photo else None,
+        "posted_at": listing.posted_at.isoformat() if listing.posted_at else None,
+    }
+
+
 def listing_to_dict(listing: Listing) -> dict:
     return {
         "id": listing.id,
@@ -261,40 +296,53 @@ def media(filename: str):
     return send_from_directory(MEDIA_DIR, filename)
 
 
+def _filtered_listings(session):
+    """The published listings matching the request's filters.
+
+    Shared by the feed and the map so a pin can never disagree with a card:
+    they were separate copies of this logic before, which is how a filter could
+    appear to work in one place and not the other.
+    """
+    query = session.query(Listing).filter(Listing.status == ListingStatus.APPROVED)
+
+    # Every filter is optional ("любое"). Those with more than two choices
+    # accept several values at once (?rooms=1,2 = "1 or 2"), so each is an
+    # IN over whatever the client ticked.
+    cities = coerce_enum_list(City, request.args.get("city"))
+    if cities:
+        query = query.filter(Listing.city.in_(cities))
+    property_types = coerce_enum_list(PropertyType, request.args.get("property_type"))
+    if property_types:
+        query = query.filter(Listing.property_type.in_(property_types))
+    rooms = parse_str_list(request.args.get("rooms"), ROOM_CHOICES)
+    if rooms:
+        query = query.filter(Listing.rooms.in_(rooms))
+    renovations = coerce_enum_list(RenovationQuality, request.args.get("renovation_quality"))
+    if renovations:
+        query = query.filter(Listing.renovation_quality.in_(renovations))
+
+    # Pets is a yes/no question, so it stays a single choice.
+    pets_policy = coerce_enum(PetsPolicy, request.args.get("pets_policy"))
+    if pets_policy:
+        query = query.filter(Listing.pets_policy == pets_policy)
+
+    # A listing carries its own [min, max] range, so "fits my budget" means the
+    # two ranges overlap. A listing with no price at all cannot be shown to fit
+    # a budget, so a price filter excludes it rather than letting NULLs through.
+    price_min = request.args.get("price_min", type=float)
+    if price_min is not None:
+        query = query.filter(Listing.price_max_usd.isnot(None), Listing.price_max_usd >= price_min)
+    price_max = request.args.get("price_max", type=float)
+    if price_max is not None:
+        query = query.filter(Listing.price_min_usd.isnot(None), Listing.price_min_usd <= price_max)
+
+    return query
+
+
 @app.get("/listings")
 def list_listings():
     with SessionLocal() as session:
-        query = session.query(Listing).filter(Listing.status == ListingStatus.APPROVED)
-
-        # Every filter is optional ("любое"). Those with more than two choices
-        # accept several values at once (?rooms=1,2 = "1 or 2"), so each is an
-        # IN over whatever the client ticked.
-        cities = coerce_enum_list(City, request.args.get("city"))
-        if cities:
-            query = query.filter(Listing.city.in_(cities))
-        property_types = coerce_enum_list(PropertyType, request.args.get("property_type"))
-        if property_types:
-            query = query.filter(Listing.property_type.in_(property_types))
-        rooms = parse_str_list(request.args.get("rooms"), ROOM_CHOICES)
-        if rooms:
-            query = query.filter(Listing.rooms.in_(rooms))
-        renovations = coerce_enum_list(RenovationQuality, request.args.get("renovation_quality"))
-        if renovations:
-            query = query.filter(Listing.renovation_quality.in_(renovations))
-
-        # Pets is a yes/no question, so it stays a single choice.
-        pets_policy = coerce_enum(PetsPolicy, request.args.get("pets_policy"))
-        if pets_policy:
-            query = query.filter(Listing.pets_policy == pets_policy)
-
-        # A listing carries its own [min, max] range, so "fits my budget" means
-        # the two ranges overlap — not that a single number sits inside one.
-        price_min = request.args.get("price_min", type=float)
-        if price_min is not None:
-            query = query.filter(Listing.price_max_usd >= price_min)
-        price_max = request.args.get("price_max", type=float)
-        if price_max is not None:
-            query = query.filter(Listing.price_min_usd <= price_max)
+        query = _filtered_listings(session)
 
         # Sorting. Listings with no price sort last in both price directions:
         # they answer neither "cheapest" nor "most expensive", and a NULL
@@ -309,9 +357,43 @@ def list_listings():
         }
         query = query.order_by(*orders.get(sort, orders["newest"]))
 
-        limit = min(request.args.get("limit", default=500, type=int), 1000)
-        listings = query.limit(limit).all()
-        return jsonify([listing_to_dict(l) for l in listings])
+        total = query.count()
+        limit = min(request.args.get("limit", default=60, type=int), 200)
+        offset = max(request.args.get("offset", default=0, type=int), 0)
+        listings = query.options(selectinload(Listing.photos)).offset(offset).limit(limit).all()
+
+        return jsonify({
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "items": [listing_summary(l) for l in listings],
+        })
+
+
+@app.get("/map/points")
+def map_points():
+    """Just enough to draw the map: position and price, nothing else.
+
+    The map needs every match at once — a pin you have to paginate to is not a
+    map — so this returns the whole filtered set, but as ~60 bytes per listing
+    instead of ~6KB. Details are fetched when a pin is actually opened.
+    """
+    with SessionLocal() as session:
+        query = _filtered_listings(session)
+        rows = (
+            query.with_entities(
+                Listing.id, Listing.lat, Listing.lng,
+                Listing.price_min_usd, Listing.location_is_approximate,
+            )
+            .filter(Listing.lat.isnot(None))
+            .limit(5000)
+            .all()
+        )
+        return jsonify([
+            {"id": r[0], "lat": round(r[1], 5), "lng": round(r[2], 5),
+             "price": round(r[3]) if r[3] else None, "approx": bool(r[4])}
+            for r in rows
+        ])
 
 
 @app.get("/listings/<int:listing_id>")
