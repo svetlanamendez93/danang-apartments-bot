@@ -47,6 +47,12 @@ const I18N = {
     en: "⚠️ The post gives no address — the pin only shows the general area",
     vi: "⚠️ Bài đăng không có địa chỉ — ghim chỉ cho biết khu vực chung",
   },
+  open_in_maps:  { ru: "Открыть в Google Maps", en: "Open in Google Maps", vi: "Mở trong Google Maps" },
+  open_area_in_maps: {
+    ru: "Посмотреть район в Google Maps",
+    en: "View the area in Google Maps",
+    vi: "Xem khu vực trên Google Maps",
+  },
   today:         { ru: "сегодня",           en: "today",           vi: "hôm nay" },
   yesterday:     { ru: "вчера",             en: "yesterday",       vi: "hôm qua" },
   ago:           { ru: "назад",             en: "ago",             vi: "trước" },

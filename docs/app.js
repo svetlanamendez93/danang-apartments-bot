@@ -289,6 +289,36 @@ function specCells(listing) {
   return cells;
 }
 
+const CITY_QUERY_NAME = {
+  da_nang: "Da Nang",
+  nha_trang: "Nha Trang",
+  ho_chi_minh: "Ho Chi Minh City",
+  hanoi: "Hanoi",
+  hoi_an: "Hoi An",
+};
+
+function googleMapsUrl(listing) {
+  // Search by the address text whenever the post gave one, even if our own pin
+  // is approximate: the text is a real street or building name that Google can
+  // resolve far more precisely than the district coordinate we fell back to,
+  // and it lands on a place with street view rather than a bare point.
+  if (listing.address_text) {
+    const city = CITY_QUERY_NAME[listing.city] || "";
+    const query = [listing.address_text, city, "Vietnam"].filter(Boolean).join(", ");
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  }
+  if (listing.lat != null && listing.lng != null) {
+    return `https://www.google.com/maps/search/?api=1&query=${listing.lat},${listing.lng}`;
+  }
+  return null;
+}
+
+// Searching by address name lands on a real place; a bare coordinate from the
+// fallback only shows a general area, and the label should not overclaim.
+function mapsLinkIsPrecise(listing) {
+  return Boolean(listing.address_text);
+}
+
 function relativeDate(iso) {
   const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
   if (days <= 0) return t("today");
@@ -321,6 +351,14 @@ function renderDetails(listing) {
     ${
       listing.location_is_approximate
         ? `<div class="d-approx">${t("approx_location")}</div>`
+        : ""
+    }
+    ${
+      googleMapsUrl(listing)
+        ? `<a class="maps-link" href="${escapeHtml(googleMapsUrl(listing))}"
+              target="_blank" rel="noopener">
+             🗺 ${mapsLinkIsPrecise(listing) ? t("open_in_maps") : t("open_area_in_maps")}
+           </a>`
         : ""
     }
 

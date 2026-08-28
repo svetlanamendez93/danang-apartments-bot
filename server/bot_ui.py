@@ -7,6 +7,7 @@ and by an on-demand /listings request, and they must not drift apart.
 from __future__ import annotations
 
 import html
+from urllib.parse import quote
 
 from db.models import City, Listing, PetsPolicy, PropertyType, RenovationQuality
 from server.i18n import LANG_FLAGS, LANG_NAMES, SUPPORTED_LANGS, t
@@ -65,6 +66,8 @@ _MISC = {
     "open_original": {"ru": "↗️ Открыть оригинал", "en": "↗️ Open the original", "vi": "↗️ Mở bài gốc"},
     "photos_count": {"ru": "фото: {n}", "en": "{n} photos", "vi": "{n} ảnh"},
     "source": {"ru": "Источник", "en": "Source", "vi": "Nguồn"},
+    "open_in_maps": {"ru": "🗺 На карте", "en": "🗺 On the map", "vi": "🗺 Trên bản đồ"},
+    "open_area_in_maps": {"ru": "🗺 Район", "en": "🗺 Area", "vi": "🗺 Khu vực"},
 }
 
 
@@ -169,10 +172,38 @@ def main_menu(lang: str, webapp_url: str, *, is_admin: bool = False) -> dict:
     return {"inline_keyboard": rows}
 
 
+CITY_QUERY_NAME = {
+    City.DA_NANG: "Da Nang",
+    City.NHA_TRANG: "Nha Trang",
+    City.HO_CHI_MINH: "Ho Chi Minh City",
+    City.HANOI: "Hanoi",
+    City.HOI_AN: "Hoi An",
+}
+
+
+def google_maps_url(listing: Listing) -> str | None:
+    """A Google Maps link for the listing's location.
+
+    Searching by the address text is preferred over the coordinate even when
+    our own pin is approximate: the text is a real street or building name that
+    Google resolves more precisely than the district point we fell back to.
+    """
+    if listing.address_text:
+        parts = [listing.address_text, CITY_QUERY_NAME.get(listing.city, ""), "Vietnam"]
+        query = ", ".join(p for p in parts if p)
+        return "https://www.google.com/maps/search/?api=1&query=" + quote(query)
+    if listing.lat is not None and listing.lng is not None:
+        return f"https://www.google.com/maps/search/?api=1&query={listing.lat},{listing.lng}"
+    return None
+
+
 def listing_buttons(listing: Listing, lang: str) -> dict:
-    return {"inline_keyboard": [[
-        {"text": misc("open_original", lang), "url": listing.source_url},
-    ]]}
+    row = [{"text": misc("open_original", lang), "url": listing.source_url}]
+    maps_url = google_maps_url(listing)
+    if maps_url:
+        key = "open_in_maps" if listing.address_text else "open_area_in_maps"
+        row.append({"text": misc(key, lang), "url": maps_url})
+    return {"inline_keyboard": [row]}
 
 
 def persistent_keyboard(lang: str, webapp_url: str) -> dict:
