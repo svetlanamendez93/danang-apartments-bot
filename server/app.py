@@ -48,6 +48,7 @@ from db.models import (
 )
 from parser.cleaner import clean_post_text
 from parser.extractor import extract
+from parser.places import find_address_text, find_place
 from server import bot_ui, i18n, quality, ratelimit, telegram_api
 
 logger = logging.getLogger(__name__)
@@ -405,6 +406,8 @@ def ingest():
                 default_city=CHANNEL_DEFAULT_CITY.get(channel_username.lower()),
             )
             verdict = quality.assess(text, extracted.city, extracted.price_min_usd, extracted.rooms)
+            place = find_place(text, extracted.city if extracted.city != City.OTHER else None)
+            address = find_address_text(text) or (place.name if place else None)
 
             if not source.auto_publish:
                 status = ListingStatus.PENDING
@@ -420,9 +423,15 @@ def ingest():
             elif status == ListingStatus.REJECTED:
                 held += 1
 
-            fallback_lat, fallback_lng = fallback_coords(extracted.city, source_url)
+            # A recognised district or complex is a real position; the jittered
+            # city centre is only used when nothing at all was identified.
+            if place:
+                lat, lng = place.lat, place.lng
+            else:
+                lat, lng = fallback_coords(extracted.city, source_url)
             listing = Listing(
                 status=status,
+                address_text=address,
                 content_hash=fingerprint,
                 quality_note=verdict.reason,
                 needs_review=verdict.needs_review,
@@ -431,8 +440,8 @@ def ingest():
                 source_url=source_url,
                 source_message_id=post["message_id"],
                 city=extracted.city,
-                lat=fallback_lat,
-                lng=fallback_lng,
+                lat=lat,
+                lng=lng,
                 price_min_usd=extracted.price_min_usd,
                 price_max_usd=extracted.price_max_usd,
                 rooms=extracted.rooms,
@@ -1034,7 +1043,12 @@ def _create_manual_listing(message: dict, content: str) -> None:
 
     extracted = extract(content)
     source_url = url_match.group(0) if url_match else f"tg://user?id={chat_id}"
-    fallback_lat, fallback_lng = fallback_coords(extracted.city, f"{source_url}:{message['message_id']}")
+    place = find_place(content, extracted.city if extracted.city != City.OTHER else None)
+    address = find_address_text(content) or (place.name if place else None)
+    if place:
+        lat, lng = place.lat, place.lng
+    else:
+        lat, lng = fallback_coords(extracted.city, f"{source_url}:{message['message_id']}")
 
     with SessionLocal() as session:
         listing = Listing(
@@ -1045,8 +1059,9 @@ def _create_manual_listing(message: dict, content: str) -> None:
             source_type=SourceType.FACEBOOK if url_match and "facebook" in url_match.group(0) else SourceType.MANUAL,
             source_url=source_url,
             city=extracted.city,
-            lat=fallback_lat,
-            lng=fallback_lng,
+            address_text=address,
+            lat=lat,
+            lng=lng,
             price_min_usd=extracted.price_min_usd,
             price_max_usd=extracted.price_max_usd,
             rooms=extracted.rooms,

@@ -148,7 +148,16 @@ async function loadListings() {
 
   const cities = [...selected.city];
   if (cities.length === 1 && CITY_CENTERS[cities[0]]) {
-    map.panTo(CITY_CENTERS[cities[0]]);
+    map.setView(CITY_CENTERS[cities[0]], 13);
+  } else {
+    // Listings span cities hundreds of km apart, so a fixed view on one city
+    // hides most of them — without this the map looked almost empty.
+    const points = listings
+      .filter((l) => l.lat != null && l.lng != null)
+      .map((l) => [l.lat, l.lng]);
+    if (points.length) {
+      map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 14 });
+    }
   }
 
   status.textContent = listings.length
@@ -213,11 +222,14 @@ function openListing(listing) {
 
   const photos = (listing.photos || []).slice().sort((a, b) => a.position - b.position);
   if (photos.length) {
-    photos.forEach((p) => {
+    photos.forEach((p, i) => {
       const img = document.createElement("img");
       img.src = p.url;
       img.loading = "lazy";
       img.alt = "";
+      // Photos are the main thing people judge a flat on, so any of them opens
+      // full screen rather than staying a small strip.
+      img.onclick = () => openLightbox(photos.map((x) => x.url), i);
       gallery.appendChild(img);
     });
     if (photos.length > 1) {
@@ -349,6 +361,35 @@ function renderDetails(listing) {
     </a>`;
 }
 
+// --- fullscreen photo viewer ---------------------------------------------------
+
+let lbPhotos = [];
+let lbIndex = 0;
+
+function openLightbox(urls, index) {
+  lbPhotos = urls;
+  lbIndex = index;
+  showLightboxPhoto();
+  document.getElementById("lightbox").classList.remove("hidden");
+}
+
+function showLightboxPhoto() {
+  document.getElementById("lightboxImg").src = lbPhotos[lbIndex];
+  document.getElementById("lightboxCount").textContent = `${lbIndex + 1} / ${lbPhotos.length}`;
+  const single = lbPhotos.length < 2;
+  document.getElementById("lightboxPrev").classList.toggle("hidden", single);
+  document.getElementById("lightboxNext").classList.toggle("hidden", single);
+}
+
+function stepLightbox(delta) {
+  lbIndex = (lbIndex + delta + lbPhotos.length) % lbPhotos.length;
+  showLightboxPhoto();
+}
+
+function closeLightbox() {
+  document.getElementById("lightbox").classList.add("hidden");
+}
+
 // --- language -----------------------------------------------------------------
 
 function applyStaticTranslations() {
@@ -422,6 +463,26 @@ function init() {
   document.getElementById("langScrim").onclick = () => closeSheet("lang");
   document.getElementById("closeModal").onclick = () =>
     document.getElementById("listingModal").classList.add("hidden");
+
+  document.getElementById("lightboxClose").onclick = closeLightbox;
+  document.getElementById("lightboxPrev").onclick = (e) => {
+    e.stopPropagation();
+    stepLightbox(-1);
+  };
+  document.getElementById("lightboxNext").onclick = (e) => {
+    e.stopPropagation();
+    stepLightbox(1);
+  };
+  // Tapping the backdrop closes; tapping the photo itself must not.
+  document.getElementById("lightbox").onclick = (e) => {
+    if (e.target.id === "lightbox") closeLightbox();
+  };
+  document.addEventListener("keydown", (e) => {
+    if (document.getElementById("lightbox").classList.contains("hidden")) return;
+    if (e.key === "Escape") closeLightbox();
+    if (e.key === "ArrowLeft") stepLightbox(-1);
+    if (e.key === "ArrowRight") stepLightbox(1);
+  });
 
   document.getElementById("applyFilters").onclick = () => {
     closeSheet("filters");
