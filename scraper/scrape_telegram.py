@@ -18,6 +18,11 @@ import time
 
 import requests
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+# Under GitHub Actions these arrive as workflow env vars; run by hand on the
+# server they live in .env, so load that too (existing env wins).
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 API_BASE_URL = os.environ["API_BASE_URL"]
 INGEST_TOKEN = os.environ["INGEST_TOKEN"]

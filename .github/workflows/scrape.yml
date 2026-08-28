@@ -3,7 +3,12 @@ name: Scrape Telegram channels
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      backfill_pages:
+        description: "Pages of channel history to backfill (0 = normal run, just the newest page)"
+        required: false
+        default: "0"
 
 jobs:
   scrape:
@@ -16,11 +21,17 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4 python-dotenv
 
       - name: Run scraper
         env:
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
           SOURCE_CHANNELS: ${{ vars.SOURCE_CHANNELS }}
-        run: python scraper/scrape_telegram.py
+          BACKFILL_PAGES: ${{ github.event.inputs.backfill_pages || '0' }}
+        run: |
+          if [ "$BACKFILL_PAGES" -gt 0 ]; then
+            python scraper/scrape_telegram.py --backfill "$BACKFILL_PAGES"
+          else
+            python scraper/scrape_telegram.py
+          fi
