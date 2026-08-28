@@ -1,5 +1,5 @@
 // Telegram Mini App: map + filters + listing detail.
-// API_BASE_URL should point at your deployed FastAPI instance.
+// API_BASE_URL is set in index.html; the localhost value is the dev fallback.
 const API_BASE_URL = window.API_BASE_URL || "http://localhost:5000";
 
 const tg = window.Telegram?.WebApp;
@@ -8,7 +8,6 @@ tg?.expand();
 
 let map;
 let markers = [];
-let infoListings = [];
 
 const CITY_CENTERS = {
   da_nang: { lat: 16.0544, lng: 108.2022 },
@@ -45,10 +44,32 @@ function currentFilters() {
   return params;
 }
 
+function plural(n, one, few, many) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
 async function loadListings() {
+  const status = document.getElementById("resultCount");
+  status.textContent = "Загрузка…";
+
   const params = currentFilters();
-  const res = await fetch(`${API_BASE_URL}/listings?${params.toString()}`);
-  const listings = await res.json();
+  let listings;
+  try {
+    const res = await fetch(`${API_BASE_URL}/listings?${params.toString()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    listings = await res.json();
+  } catch (err) {
+    // Without this the page just sits there looking empty, which is
+    // indistinguishable from "no listings match" — say what actually happened.
+    status.textContent = "Не удалось загрузить объявления";
+    console.error("loadListings failed:", err);
+    return;
+  }
+
   renderMarkers(listings);
 
   const city = document.getElementById("f-city").value;
@@ -56,13 +77,14 @@ async function loadListings() {
     map.panTo([CITY_CENTERS[city].lat, CITY_CENTERS[city].lng]);
   }
 
-  document.getElementById("resultCount").textContent = `${listings.length} объявлений`;
+  status.textContent = listings.length
+    ? `${listings.length} ${plural(listings.length, "объявление", "объявления", "объявлений")}`
+    : "Ничего не найдено";
 }
 
 function renderMarkers(listings) {
   markers.forEach((m) => map.removeLayer(m));
   markers = [];
-  infoListings = listings;
 
   listings.forEach((listing) => {
     if (listing.lat == null || listing.lng == null) return; // без координат на карте не показываем

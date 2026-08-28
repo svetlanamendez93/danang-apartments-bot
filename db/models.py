@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Enum,
@@ -155,7 +156,8 @@ class TgUser(Base):
     __tablename__ = "tg_users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(Integer, unique=True)
+    # BigInteger: Telegram user ids have outgrown the 32-bit signed range.
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -192,7 +194,7 @@ class RateLimitState(Base):
     __tablename__ = "rate_limit_state"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(Integer)
+    telegram_id: Mapped[int] = mapped_column(BigInteger)  # see TgUser.telegram_id
     action: Mapped[str] = mapped_column(String(32))
 
     window_start: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

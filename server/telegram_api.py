@@ -34,15 +34,35 @@ def _post(method: str, payload: dict, timeout: int = 10) -> dict | None:
     return resp.json()
 
 
-def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> None:
+def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> dict | None:
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    _post("sendMessage", payload)
+    result = _post("sendMessage", payload)
+    if result is None:
+        # HTML parse errors reject the whole message (a stray "<" in a scraped
+        # post is enough), so retry once as plain text rather than losing it.
+        payload.pop("parse_mode")
+        result = _post("sendMessage", payload)
+    return result
+
+
+def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | None = None) -> dict | None:
+    payload = {"chat_id": chat_id, "photo": photo_url, "caption": caption, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return _post("sendPhoto", payload, timeout=20)
 
 
 def edit_message_text(chat_id: int, message_id: int, text: str) -> None:
     _post("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text})
+
+
+def edit_message_reply_markup(chat_id: int, message_id: int, reply_markup: dict | None) -> None:
+    payload = {"chat_id": chat_id, "message_id": message_id}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    _post("editMessageReplyMarkup", payload)
 
 
 def answer_callback_query(callback_query_id: str, text: str | None = None) -> None:
@@ -67,8 +87,13 @@ def download_file(file_id: str, destination: str) -> None:
         f.write(resp.content)
 
 
-def set_webhook(webhook_url: str) -> dict:
-    resp = requests.post(f"{API_URL}/setWebhook", json={"url": webhook_url}, timeout=10)
+def set_webhook(webhook_url: str, secret_token: str | None = None) -> dict:
+    payload: dict = {"url": webhook_url}
+    if secret_token:
+        # Telegram sends this back as X-Telegram-Bot-Api-Secret-Token on every
+        # call, which is how the server tells real updates from forged ones.
+        payload["secret_token"] = secret_token
+    resp = requests.post(f"{API_URL}/setWebhook", json=payload, timeout=10)
     resp.raise_for_status()
     return resp.json()
 

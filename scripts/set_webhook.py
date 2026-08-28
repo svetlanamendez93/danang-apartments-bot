@@ -29,6 +29,15 @@ from server import telegram_api  # noqa: E402 (must import after load_dotenv)
 if __name__ == "__main__":
     api_base_url = os.environ["API_BASE_URL"]
     webhook_url = f"{api_base_url}/bot/webhook"
-    result = telegram_api.set_webhook(webhook_url)
-    print(f"Webhook set to {webhook_url}")
+    secret = os.environ.get("WEBHOOK_SECRET", "")
+
+    if not secret:
+        print(
+            "WARNING: WEBHOOK_SECRET is not set in .env — the webhook endpoint will\n"
+            "accept unauthenticated POSTs, letting anyone who guesses the URL approve\n"
+            "or reject listings. Set it to a random string and re-run this script."
+        )
+
+    result = telegram_api.set_webhook(webhook_url, secret)
+    print(f"Webhook set to {webhook_url}" + (" (with secret token)" if secret else ""))
     print(result)

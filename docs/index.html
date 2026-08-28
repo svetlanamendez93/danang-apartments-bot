@@ -91,6 +91,11 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Where the Flask API lives. Set here rather than in app.js so redeploying
+    // the Mini App to a different backend is a one-line change in one file.
+    window.API_BASE_URL = "https://svetlanamendez93.pythonanywhere.com";
+  </script>
   <script src="app.js"></script>
 </body>
 </html>

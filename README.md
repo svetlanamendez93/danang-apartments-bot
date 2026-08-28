@@ -55,11 +55,19 @@ GitHub Actions (scraper) ──POST /internal/ingest──▶ Flask-сервер
 1. Зарегистрируйтесь на [pythonanywhere.com](https://www.pythonanywhere.com), тариф Beginner (free).
 2. Загрузите код проекта (через Git-клонирование репозитория в консоли PythonAnywhere — доступ к github.com в бесплатном тарифе разрешён).
 3. `pip install --user -r requirements.txt` в консоли PythonAnywhere.
-4. Создайте `.env` из `.env.example`, заполните `BOT_TOKEN`, `ADMIN_TELEGRAM_IDS`, придумайте `ADMIN_API_TOKEN` и `INGEST_TOKEN` (любые случайные строки), укажите `DATABASE_URL=sqlite:////home/<youruser>/danang_apartments.db`, `API_BASE_URL=https://<youruser>.pythonanywhere.com`.
-5. Во вкладке **Web** создайте новое Flask-приложение, укажите путь к `server/app.py` (или пропишите WSGI-файл, импортирующий `from server.app import app as application`).
-6. После деплоя пропишите вебхук бота (один раз, из консоли PythonAnywhere):
+4. Создайте `.env` из `.env.example` (`cp .env.example .env`) и заполните: `BOT_TOKEN`, `ADMIN_TELEGRAM_IDS`, три случайные строки в `ADMIN_API_TOKEN` / `INGEST_TOKEN` / `WEBHOOK_SECRET`, `DATABASE_URL=sqlite:////home/<youruser>/danang-apartments-bot/danang_apartments.db` (**четыре** слэша — это абсолютный путь), `API_BASE_URL=https://<youruser>.pythonanywhere.com`, `WEBAPP_URL` — HTTPS-адрес GitHub Pages (шаг 4).
+5. Во вкладке **Web** → Add a new web app → **Manual configuration** → Python 3.10. Затем укажите Virtualenv `/home/<youruser>/.virtualenvs/<env>` и в WSGI-файле:
+   ```python
+   import sys
+   path = '/home/<youruser>/danang-apartments-bot'
+   if path not in sys.path:
+       sys.path.insert(0, path)
+   from server.app import app as application
+   ```
+6. Нажмите **Reload**, проверьте `https://<youruser>.pythonanywhere.com/listings` — должен вернуться `[]`.
+7. Пропишите вебхук бота (один раз, из консоли PythonAnywhere):
    ```bash
-   python -c "from server.telegram_api import set_webhook; import os; from dotenv import load_dotenv; load_dotenv(); print(set_webhook(os.environ['API_BASE_URL'] + '/bot/webhook'))"
+   python scripts/set_webhook.py
    ```
 
 ### 3. Скрапер (GitHub Actions, бесплатно)
@@ -70,9 +78,26 @@ GitHub Actions (scraper) ──POST /internal/ingest──▶ Flask-сервер
 3. Workflow `.github/workflows/scrape.yml` запустится сам по расписанию раз в 5 минут; можно запустить вручную вкладкой Actions → Run workflow.
 
 ### 4. Mini App (GitHub Pages, бесплатно)
-1. В настройках репозитория включите GitHub Pages, источник — папка `docs/` (или отдельная ветка `gh-pages`).
-2. В `docs/app.js` пропишите `API_BASE_URL` на реальный адрес сервера (или задайте `window.API_BASE_URL` в `index.html` перед подключением `app.js`).
-3. В [@BotFather](https://t.me/BotFather) → выбранный бот → **Bot Settings → Menu Button** (или `/setmenubutton`) укажите URL страницы GitHub Pages — это и есть Mini App.
+1. Settings → **Pages** → Deploy from a branch → ветка `main`, папка **`/docs`**. (GitHub Pages умеет отдавать только корень репозитория или `/docs` — поэтому папка называется именно так.)
+2. В `docs/index.html` пропишите `window.API_BASE_URL` — реальный адрес сервера.
+3. Полученный HTTPS-адрес пропишите в `.env` как `WEBAPP_URL` и нажмите **Reload** на PythonAnywhere. Telegram принимает в кнопке Mini App **только HTTPS** — с `http://` он отклоняет сообщение целиком, и бот выглядит «молчащим».
+4. В [@BotFather](https://t.me/BotFather) → бот → **Bot Settings → Menu Button** укажите тот же URL.
+
+## Как модерировать
+
+Спарсенные и присланные объявления попадают в очередь со статусом `pending` и **не видны в Mini App**, пока модератор их не одобрит.
+
+- `/pending` в боте — показывает самое старое непроверенное объявление с фото и кнопками ✅/❌
+- после решения сразу подгружается следующее, так что очередь проходится без повторного ввода команды
+- команда доступна только тем, чей Telegram id указан в `ADMIN_TELEGRAM_IDS`
+
+## Тесты
+
+```bash
+python tests/test_e2e.py
+```
+
+Поднимает приложение на временной SQLite-базе с заглушками вместо Telegram API — ни сервера, ни сети, ни токена не нужно. Проверяет ingest ровно в том формате, который шлёт скрапер, CORS-заголовки, очередь модерации, фильтры и аутентификацию вебхука.
 
 ## Локальный запуск для разработки
 
@@ -89,12 +114,20 @@ API_BASE_URL=http://localhost:5000 INGEST_TOKEN=... SOURCE_CHANNELS=danangrentaf
 
 Webapp — откройте `docs/index.html` через любой статический сервер (например `python -m http.server` из папки `docs/`), не напрямую файлом (иначе не сработают fetch-запросы к API).
 
-## Стартовый список Telegram-источников (проверьте вручную перед включением)
+## Telegram-источники
 
-- `danangrentaflat` — Da Nang rent apartments, NO commission (~4300 подписчиков)
-- `apartmentforrentdanang`
-- `onewaydanang` — виллы
-- `vietnam_rent` — широкий канал по Вьетнаму (Нячанг/Дананг/Хошимин/Ханой)
+Скрапер читает публичную веб-версию канала (`https://t.me/s/<name>`). **Она существует только у каналов.** У групп/чатов такой страницы нет: `t.me/s/<name>` вернёт HTTP 200 со страницей участников и нулём постов, и источник будет молча простаивать. Проверка одна — открыть `https://t.me/s/<name>` в браузере: видны посты — скрапится, не видны — нет.
+
+Проверено на момент настройки:
+
+| Источник | Тип | Скрапится |
+|---|---|---|
+| `danangrentaflat` | канал, ~4300 подписчиков | ✅ да |
+| `onewaydanang` | канал, виллы | ✅ да |
+| `apartmentforrentdanang` | **группа**, ~2000 участников | ❌ нет |
+| `vietnam_rent` | **группа**, ~6500 участников | ❌ нет |
+
+Две группы из исходного списка убраны из `SOURCE_CHANNELS` — их содержимое доступно только через `/submit` вручную. Скрапер теперь явно пишет в лог, если источник не отдал ни одного поста, вместо того чтобы выглядеть как «новых объявлений нет».
 
 Список редактируется в GitHub Actions variable `SOURCE_CHANNELS`, без изменения кода.
 

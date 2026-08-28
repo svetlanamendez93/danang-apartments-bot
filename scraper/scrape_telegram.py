@@ -39,8 +39,19 @@ def scrape_channel(channel: str, since_id: int) -> list[dict]:
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
+    blocks = soup.select(".tgme_widget_message")
+    if not blocks:
+        # t.me/s/<name> only renders posts for public *channels*. Groups return
+        # HTTP 200 with a members page and no posts, so a misconfigured source
+        # would otherwise look like "nothing new" forever instead of an error.
+        print(
+            f"[{channel}] no posts on the page — this is normally a group/chat "
+            f"(not a channel) or a private channel; it cannot be scraped this way"
+        )
+        return []
+
     posts = []
-    for block in soup.select(".tgme_widget_message"):
+    for block in blocks:
         data_post = block.get("data-post", "")
         if "/" not in data_post:
             continue
@@ -50,6 +61,10 @@ def scrape_channel(channel: str, since_id: int) -> list[dict]:
 
         text_el = block.select_one(".tgme_widget_message_text")
         text = text_el.get_text("\n").strip() if text_el else ""
+        if not text:
+            # Photo-only posts (album continuations, stickers, service messages)
+            # carry nothing to extract a price or city from.
+            continue
 
         photo_urls = []
         for photo_el in block.select(".tgme_widget_message_photo_wrap"):
@@ -58,7 +73,9 @@ def scrape_channel(channel: str, since_id: int) -> list[dict]:
             if match:
                 photo_urls.append(match.group(1))
 
-        time_el = block.select_one("time")
+        # Must select on [datetime]: some posts render a <time> holding only a
+        # display string, and picking that one yields None for every post.
+        time_el = block.select_one("time[datetime]")
         posted_at = time_el.get("datetime") if time_el else None
 
         posts.append(
@@ -79,21 +96,33 @@ def main() -> None:
 
     last_ids = fetch_last_message_ids()
 
+    failures = 0
     for channel in SOURCE_CHANNELS:
-        since_id = last_ids.get(channel, 0)
-        posts = scrape_channel(channel, since_id)
-        if not posts:
-            print(f"[{channel}] no new posts")
-            continue
+        # One unreachable channel or a single ingest hiccup must not abort the
+        # whole run — the remaining channels are independent of it.
+        try:
+            since_id = last_ids.get(channel, 0)
+            posts = scrape_channel(channel, since_id)
+            if not posts:
+                print(f"[{channel}] no new posts")
+                continue
 
-        resp = requests.post(
-            f"{API_BASE_URL}/internal/ingest",
-            headers={"X-Ingest-Token": INGEST_TOKEN},
-            json={"channel_username": channel, "posts": posts},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        print(f"[{channel}] ingested: {resp.json()}")
+            resp = requests.post(
+                f"{API_BASE_URL}/internal/ingest",
+                headers={"X-Ingest-Token": INGEST_TOKEN},
+                json={"channel_username": channel, "posts": posts},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            print(f"[{channel}] ingested: {resp.json()}")
+        except Exception as exc:
+            failures += 1
+            print(f"[{channel}] FAILED: {type(exc).__name__}: {exc}")
+
+    if failures == len(SOURCE_CHANNELS):
+        # Every source failing means something systemic (API down, bad token) —
+        # exit non-zero so the scheduled run shows up as failed instead of green.
+        raise SystemExit(f"all {failures} source(s) failed")
 
 
 if __name__ == "__main__":
