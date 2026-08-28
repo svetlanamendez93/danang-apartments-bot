@@ -12,7 +12,10 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Explicit path, not just load_dotenv() — dotenv's default cwd-based search
+# only works if this is run from the project root; this way it doesn't matter.
+_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+load_dotenv(_ENV_PATH)
 
 from server import telegram_api  # noqa: E402 (must import after load_dotenv)
 

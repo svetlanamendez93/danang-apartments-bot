@@ -13,7 +13,11 @@ from dotenv import load_dotenv
 # Must run before any local import: db.models reads DATABASE_URL and
 # server.telegram_api reads BOT_TOKEN at import time, so .env has to already
 # be loaded into os.environ by the time those modules are imported.
-load_dotenv()
+# Path is explicit (not just load_dotenv()) because under WSGI the process's
+# working directory is not the project directory, so dotenv's default
+# cwd-based search for ".env" fails silently and nothing gets loaded.
+_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+load_dotenv(_ENV_PATH)
 
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.exceptions import Forbidden, NotFound
