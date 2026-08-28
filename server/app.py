@@ -10,7 +10,7 @@ import hashlib
 import html
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -24,6 +24,8 @@ _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env
 load_dotenv(_ENV_PATH)
 
 from flask import Flask, jsonify, request, send_from_directory
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import Forbidden, NotFound
 
 from db.models import (
@@ -35,14 +37,17 @@ from db.models import (
     PetsPolicy,
     Photo,
     PropertyType,
+    RateLimitState,
     RenovationQuality,
+    SavedFilter,
     SessionLocal,
     Source,
     SourceType,
+    TgUser,
     init_db,
 )
 from parser.extractor import extract
-from server import ratelimit, telegram_api
+from server import bot_ui, i18n, quality, ratelimit, telegram_api
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +62,37 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 MEDIA_DIR = os.path.join(os.path.dirname(__file__), "..", "media")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
+# `rooms` is a free-form column ("studio", "1"…"4"), so filter values are
+# validated against this set rather than an enum.
+ROOM_CHOICES = {"studio", "1", "2", "3", "4"}
+
+# After this long a rental has almost certainly been taken; listings older
+# than this are hidden automatically so the map stays trustworthy.
+LISTING_TTL_DAYS = int(os.environ.get("LISTING_TTL_DAYS", "45"))
+
+# Cap on how many listings one subscription receives per ingest, so a large
+# scrape cannot dump dozens of messages into a chat at once.
+SUBSCRIPTION_BATCH_LIMIT = 5
+
 app = Flask(__name__)
 init_db()
+
+
+@app.before_request
+def throttle_public_api(response=None):
+    """Keep one client from burning the whole daily CPU quota.
+
+    Only the public read endpoints are throttled: the bot webhook must never be
+    rate-limited (Telegram would retry and the bot would look broken), and the
+    admin/ingest routes already require a token.
+    """
+    if not request.path.startswith("/listings"):
+        return None
+    # PythonAnywhere puts the real client IP here; remote_addr is their proxy.
+    ip = (request.headers.get("X-Real-IP") or request.remote_addr or "unknown").split(",")[0].strip()
+    if not ratelimit.check_http(ip, limit=120, window_seconds=60):
+        return jsonify({"error": "too many requests"}), 429
+    return None
 
 
 @app.after_request
@@ -143,6 +177,26 @@ def coerce_enum(enum_cls, raw: str | None):
         return None
 
 
+def coerce_enum_list(enum_cls, raw: str | None) -> list:
+    """Parse a comma-separated multi-select filter into enum members.
+
+    The UI lets a user tick several rooms counts or property types at once
+    ("1 or 2 bedrooms"), which arrives as ?rooms=1,2. Unknown values are
+    dropped rather than rejected, so an outdated client can't break the query.
+    """
+    if not raw:
+        return []
+    members = [coerce_enum(enum_cls, part.strip()) for part in raw.split(",")]
+    return [m for m in members if m is not None]
+
+
+def parse_str_list(raw: str | None, allowed: set[str]) -> list[str]:
+    """Same as coerce_enum_list, for the free-form `rooms` column."""
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip() in allowed]
+
+
 def listing_to_dict(listing: Listing) -> dict:
     return {
         "id": listing.id,
@@ -166,6 +220,7 @@ def listing_to_dict(listing: Listing) -> dict:
         "has_pool": listing.has_pool,
         "description": listing.description,
         "contact": listing.contact,
+        "posted_at": listing.posted_at.isoformat() if listing.posted_at else None,
         "photos": [
             {"url": photo_url(p.url), "position": p.position}
             for p in sorted(listing.photos, key=lambda p: p.position)
@@ -185,23 +240,26 @@ def list_listings():
     with SessionLocal() as session:
         query = session.query(Listing).filter(Listing.status == ListingStatus.APPROVED)
 
-        # Every filter is optional ("любое"), so each one is only applied when
-        # the query string actually carries a value the enum recognises.
-        city = coerce_enum(City, request.args.get("city"))
-        if city:
-            query = query.filter(Listing.city == city)
-        property_type = coerce_enum(PropertyType, request.args.get("property_type"))
-        if property_type:
-            query = query.filter(Listing.property_type == property_type)
-        rooms = request.args.get("rooms")
+        # Every filter is optional ("любое"). Those with more than two choices
+        # accept several values at once (?rooms=1,2 = "1 or 2"), so each is an
+        # IN over whatever the client ticked.
+        cities = coerce_enum_list(City, request.args.get("city"))
+        if cities:
+            query = query.filter(Listing.city.in_(cities))
+        property_types = coerce_enum_list(PropertyType, request.args.get("property_type"))
+        if property_types:
+            query = query.filter(Listing.property_type.in_(property_types))
+        rooms = parse_str_list(request.args.get("rooms"), ROOM_CHOICES)
         if rooms:
-            query = query.filter(Listing.rooms == rooms)
+            query = query.filter(Listing.rooms.in_(rooms))
+        renovations = coerce_enum_list(RenovationQuality, request.args.get("renovation_quality"))
+        if renovations:
+            query = query.filter(Listing.renovation_quality.in_(renovations))
+
+        # Pets is a yes/no question, so it stays a single choice.
         pets_policy = coerce_enum(PetsPolicy, request.args.get("pets_policy"))
         if pets_policy:
             query = query.filter(Listing.pets_policy == pets_policy)
-        renovation_quality = coerce_enum(RenovationQuality, request.args.get("renovation_quality"))
-        if renovation_quality:
-            query = query.filter(Listing.renovation_quality == renovation_quality)
 
         # A listing carries its own [min, max] range, so "fits my budget" means
         # the two ranges overlap — not that a single number sits inside one.
@@ -312,7 +370,11 @@ def ingest():
     channel_username = body["channel_username"]
     posts = body.get("posts", [])
 
-    created = 0
+    published = 0
+    held = 0
+    flagged = 0
+    duplicates = 0
+
     with SessionLocal() as session:
         source = session.query(Source).filter_by(channel_username=channel_username).first()
         if not source:
@@ -327,13 +389,42 @@ def ingest():
             if exists:
                 continue
 
+            text = post.get("text", "") or ""
+            fingerprint = quality.content_hash(text)
+
+            # The same flat is routinely cross-posted to several channels and
+            # reposted weeks later; without this the map fills with copies.
+            if session.query(Listing).filter_by(content_hash=fingerprint).first():
+                duplicates += 1
+                max_message_id = max(max_message_id, post["message_id"])
+                continue
+
             extracted = extract(
-                post.get("text", ""),
+                text,
                 default_city=CHANNEL_DEFAULT_CITY.get(channel_username.lower()),
             )
+            verdict = quality.assess(text, extracted.city, extracted.price_min_usd, extracted.rooms)
+
+            if not source.auto_publish:
+                status = ListingStatus.PENDING
+            elif verdict.publish:
+                status = ListingStatus.APPROVED
+            else:
+                status = ListingStatus.REJECTED
+
+            if status == ListingStatus.APPROVED:
+                published += 1
+                if verdict.needs_review:
+                    flagged += 1
+            elif status == ListingStatus.REJECTED:
+                held += 1
+
             fallback_lat, fallback_lng = fallback_coords(extracted.city, source_url)
             listing = Listing(
-                status=ListingStatus.PENDING,
+                status=status,
+                content_hash=fingerprint,
+                quality_note=verdict.reason,
+                needs_review=verdict.needs_review,
                 source_type=SourceType.TELEGRAM,
                 source_channel=channel_username,
                 source_url=source_url,
@@ -355,24 +446,61 @@ def ingest():
             for i, url in enumerate(post.get("photo_urls", [])):
                 listing.photos.append(Photo(url=url, position=i))
             session.add(listing)
-            created += 1
             max_message_id = max(max_message_id, post["message_id"])
 
         source.last_message_id = max_message_id
+        expired = _expire_stale_listings(session)
         session.commit()
 
-    if created:
-        _notify_admins_pending_count(created, channel_username)
+    if published:
+        # Push to subscribers only after the transaction has committed, so a
+        # failure here cannot roll back the ingest itself.
+        try:
+            deliver_subscriptions()
+        except Exception:
+            logger.exception("Subscription delivery failed")
 
-    return jsonify({"created": created})
+    if published or held:
+        _notify_admins_ingest(channel_username, published, held, flagged, duplicates)
+
+    return jsonify({
+        "published": published, "held": held, "flagged": flagged,
+        "duplicates": duplicates, "expired": expired,
+    })
 
 
-def _notify_admins_pending_count(created: int, channel_username: str) -> None:
+def _expire_stale_listings(session) -> int:
+    """Hide listings old enough that the flat is almost certainly gone.
+
+    Nothing removes a listing when it gets rented, so without this the map
+    slowly fills with places nobody can rent any more — the same staleness
+    problem that made a manual approval queue unworkable.
+    """
+    cutoff = datetime.utcnow() - timedelta(days=LISTING_TTL_DAYS)
+    stale = (
+        session.query(Listing)
+        .filter(Listing.status == ListingStatus.APPROVED)
+        .filter(Listing.posted_at.isnot(None), Listing.posted_at < cutoff)
+    )
+    count = stale.count()
+    if count:
+        stale.update({Listing.status: ListingStatus.EXPIRED}, synchronize_session=False)
+    return count
+
+
+def _notify_admins_ingest(channel: str, published: int, held: int, flagged: int, duplicates: int) -> None:
+    """One digest per scrape run — a message per listing would be unusable at
+    the rate the channels post."""
+    lines = [f"📥 <b>@{channel}</b>", f"Опубликовано: {published}"]
+    if flagged:
+        lines.append(f"⚠️ Из них требуют проверки: {flagged} → /review")
+    if held:
+        lines.append(f"🚫 Отсеяно автоматически: {held} → /rejected")
+    if duplicates:
+        lines.append(f"♻️ Пропущено дублей: {duplicates}")
+
     for admin_id in ADMIN_TELEGRAM_IDS:
-        telegram_api.send_message(
-            admin_id,
-            f"Новых объявлений из @{channel_username}: {created}. Проверить: /pending",
-        )
+        telegram_api.send_message(admin_id, "\n".join(lines))
 
 
 # --- Telegram bot webhook ------------------------------------------------------
@@ -405,6 +533,55 @@ def bot_webhook():
     return jsonify({"ok": True})
 
 
+def _remember_user(sender: dict) -> None:
+    """Record who talks to the bot, so /stats can report real audience size."""
+    with SessionLocal() as session:
+        user = session.query(TgUser).filter_by(telegram_id=sender["id"]).first()
+        if user:
+            if user.username != sender.get("username"):
+                user.username = sender.get("username")
+                session.commit()
+            return
+        # Seed the language from the Telegram client so someone who doesn't
+        # read Russian sees their own language on the very first message,
+        # rather than having to find the switch first.
+        session.add(TgUser(
+            telegram_id=sender["id"],
+            username=sender.get("username"),
+            lang=i18n.normalize_lang(sender.get("language_code")),
+        ))
+        try:
+            session.commit()
+        except IntegrityError:
+            # Two messages from a new user can race; the row exists either way.
+            session.rollback()
+
+
+def _user_lang(sender: dict) -> str:
+    """The user's chosen language, or their Telegram client's as a starting point."""
+    with SessionLocal() as session:
+        user = session.query(TgUser).filter_by(telegram_id=sender["id"]).first()
+        if user and user.lang:
+            return user.lang
+    return i18n.normalize_lang(sender.get("language_code"))
+
+
+def _set_user_lang(telegram_id: int, lang: str) -> None:
+    with SessionLocal() as session:
+        user = session.query(TgUser).filter_by(telegram_id=telegram_id).first()
+        if user:
+            user.lang = lang
+            session.commit()
+
+
+def _send_main_menu(chat_id: int, lang: str, is_admin_user: bool) -> None:
+    telegram_api.send_message(
+        chat_id,
+        f"{i18n.t('welcome_title', lang)}\n\n{i18n.t('welcome_body', lang)}",
+        reply_markup=bot_ui.main_menu(lang, WEBAPP_URL, is_admin=is_admin_user),
+    )
+
+
 def _handle_message(message: dict) -> None:
     sender = message.get("from")
     if not sender:
@@ -423,25 +600,58 @@ def _handle_message(message: dict) -> None:
         if not allowed:
             return
 
-    if text.startswith("/start") or text.startswith("/help"):
-        telegram_api.send_message(
-            chat_id,
-            "Привет! Здесь актуальные объявления по аренде жилья в Дананге, Нячанге, "
-            "Хошимине и других городах Вьетнама.\n\n"
-            "Нажмите кнопку ниже, чтобы открыть карту с фильтрами по цене, "
-            "количеству комнат, типу жилья и питомцам.\n\n"
-            "Нашли объявление в Facebook, которого нет в боте? Пришлите его командой\n"
-            "/submit текст объявления и ссылка на оригинал\n"
-            "— можно с одним фото.",
-            reply_markup=telegram_api.webapp_button("🏠 Смотреть квартиры", WEBAPP_URL),
-        )
+    _remember_user(sender)
+    lang = _user_lang(sender)
+
+    if text.startswith("/start"):
+        _send_main_menu(chat_id, lang, is_admin_user)
+        return
+
+    if text.startswith("/help"):
+        telegram_api.send_message(chat_id, i18n.t("help_text", lang),
+                                  reply_markup=bot_ui.main_menu(lang, WEBAPP_URL, is_admin=is_admin_user))
+        return
+
+    if text.startswith("/language") or text.startswith("/lang"):
+        telegram_api.send_message(chat_id, i18n.t("choose_language", lang),
+                                  reply_markup=bot_ui.language_keyboard(lang))
+        return
+
+    if text.startswith("/latest"):
+        _send_listing_page(chat_id, lang, offset=0)
+        return
+
+    if text.startswith("/subscribe") or text.startswith("/alerts"):
+        _send_subscription_menu(chat_id, user_id, lang)
+        return
+
+    # --- admin commands ---
+    if text.startswith("/stats"):
+        if not is_admin_user:
+            telegram_api.send_message(chat_id, i18n.t("admins_only", lang))
+            return
+        telegram_api.send_message(chat_id, _render_stats())
+        return
+
+    if text.startswith("/review"):
+        if not is_admin_user:
+            telegram_api.send_message(chat_id, i18n.t("admins_only", lang))
+            return
+        _send_review_queue(chat_id, lang, flagged_only=True)
         return
 
     if text.startswith("/pending"):
         if not is_admin_user:
-            telegram_api.send_message(chat_id, "Эта команда только для модераторов.")
+            telegram_api.send_message(chat_id, i18n.t("admins_only", lang))
             return
-        _send_next_pending(chat_id)
+        _send_review_queue(chat_id, lang, flagged_only=False)
+        return
+
+    if text.startswith("/spam"):
+        if not is_admin_user:
+            telegram_api.send_message(chat_id, i18n.t("admins_only", lang))
+            return
+        telegram_api.send_message(chat_id, _render_spam_report())
         return
 
     if text.startswith("/submit"):
@@ -452,7 +662,7 @@ def _handle_message(message: dict) -> None:
         # and that escalation decays after a day of normal use — never a ban.
         if not is_admin_user:
             with SessionLocal() as session:
-                allowed, warning = ratelimit.check(
+                allowed, blocked_minutes = ratelimit.check(
                     session,
                     user_id,
                     "submit",
@@ -461,88 +671,324 @@ def _handle_message(message: dict) -> None:
                     block_durations_seconds=[5 * 60, 30 * 60, 2 * 60 * 60, 24 * 60 * 60],
                 )
             if not allowed:
-                if warning:
-                    telegram_api.send_message(chat_id, warning)
+                if blocked_minutes:
+                    telegram_api.send_message(
+                        chat_id, i18n.t("rate_limited", lang, minutes=blocked_minutes)
+                    )
                 return
 
         content = text[len("/submit"):].strip()
         if not content:
-            telegram_api.send_message(
-                chat_id, "После /submit пришлите текст объявления и ссылку на оригинал, например:\n"
-                "/submit Квартира в Дананге, $400/мес https://facebook.com/..."
-            )
+            telegram_api.send_message(chat_id, i18n.t("submit_prompt", lang))
             return
         _create_manual_listing(message, content)
-        telegram_api.send_message(chat_id, "Спасибо! Объявление отправлено на модерацию.")
+        telegram_api.send_message(chat_id, i18n.t("submit_thanks", lang))
         return
 
-    # Any other text: point the user at what the bot actually understands
-    # rather than staying silent, which reads as "the bot is broken".
-    if text.startswith("/"):
-        telegram_api.send_message(chat_id, "Неизвестная команда. Доступно: /start, /help, /submit")
-    else:
-        telegram_api.send_message(
-            chat_id,
-            "Чтобы посмотреть объявления, откройте карту командой /start.\n"
-            "Чтобы предложить объявление — /submit с текстом и ссылкой.",
-        )
-
-
-def _listing_summary(listing: Listing) -> str:
-    """Short moderator-facing description of a listing awaiting review."""
-    price = "цена не указана"
-    if listing.price_min_usd is not None:
-        if listing.price_max_usd and listing.price_max_usd != listing.price_min_usd:
-            price = f"${listing.price_min_usd:.0f}–{listing.price_max_usd:.0f}"
-        else:
-            price = f"${listing.price_min_usd:.0f}"
-
-    city_labels = {
-        City.DA_NANG: "Дананг", City.NHA_TRANG: "Нячанг", City.HO_CHI_MINH: "Хошимин",
-        City.HANOI: "Ханой", City.HOI_AN: "Хойан", City.OTHER: "город не определён",
-    }
-    rooms = {"studio": "студия"}.get(listing.rooms, f"{listing.rooms} комн." if listing.rooms else "комнаты не указаны")
-
-    body = (listing.description or "")[:600]
-    return (
-        f"<b>Объявление #{listing.id}</b>\n"
-        f"{html.escape(city_labels.get(listing.city, '—'))} · {price} · {html.escape(rooms)}\n"
-        f"Источник: {html.escape(listing.source_url)}\n\n"
-        f"{html.escape(body)}"
+    # Anything else: show the menu rather than staying silent, which reads as
+    # a broken bot.
+    telegram_api.send_message(
+        chat_id,
+        i18n.t("unknown_command", lang),
+        reply_markup=bot_ui.main_menu(lang, WEBAPP_URL, is_admin=is_admin_user),
     )
 
 
-def _send_next_pending(chat_id: int) -> None:
-    """Show the moderator the oldest listing still awaiting review.
+# --- sending listings into the chat ------------------------------------------
 
-    Scraped listings land in PENDING and are invisible in the Mini App until
-    someone approves them, so without this queue nothing a scraper finds could
-    ever reach users.
+LISTINGS_PER_PAGE = 5
+
+
+def _send_listing(chat_id: int, listing: Listing, lang: str, prefix: str = "") -> None:
+    """Send one listing with every photo the original post had.
+
+    Photos go as an album so the whole set stays one swipeable unit; the card
+    text follows as its own message because an album caption is capped well
+    below what a listing description needs.
     """
-    with SessionLocal() as session:
-        listing = (
-            session.query(Listing)
-            .filter(Listing.status == ListingStatus.PENDING)
-            .order_by(Listing.created_at.asc())
-            .first()
-        )
-        if not listing:
-            telegram_api.send_message(chat_id, "Очередь пуста — все объявления проверены. 👍")
+    photo_urls = [photo_url(p.url) for p in sorted(listing.photos, key=lambda p: p.position)]
+    header = f"{prefix}\n" if prefix else ""
+
+    if len(photo_urls) > 1:
+        # Caption on the album is short; the full card follows separately.
+        short = header + bot_ui.render_card(listing, lang, body_chars=bot_ui.CAPTION_LIMIT)
+        sent = telegram_api.send_media_group(chat_id, photo_urls, short[: bot_ui.CAPTION_LIMIT])
+        if sent:
+            telegram_api.send_message(
+                chat_id,
+                bot_ui.render_card(listing, lang, body_chars=3500),
+                reply_markup=bot_ui.listing_buttons(listing, lang),
+            )
             return
-
-        remaining = session.query(Listing).filter(Listing.status == ListingStatus.PENDING).count()
-        caption = _listing_summary(listing) + f"\n\nОсталось в очереди: {remaining}"
-        photo_urls = [p.url for p in sorted(listing.photos, key=lambda p: p.position)]
-        buttons = telegram_api.approve_reject_buttons(listing.id)
-
-    # Telegram caps a photo caption at 1024 chars, so long posts go as a plain
-    # message with the first photo sent separately rather than being truncated.
-    if photo_urls and len(caption) <= 1024:
-        sent = telegram_api.send_photo(chat_id, photo_url(photo_urls[0]), caption, reply_markup=buttons)
+    elif len(photo_urls) == 1:
+        caption = header + bot_ui.render_card(listing, lang, body_chars=bot_ui.CAPTION_LIMIT)
+        sent = telegram_api.send_photo(
+            chat_id, photo_urls[0], caption[: bot_ui.CAPTION_LIMIT],
+            reply_markup=bot_ui.listing_buttons(listing, lang),
+        )
         if sent:
             return
-        # Photo hotlink can fail (CDN link expired); fall through to text.
-    telegram_api.send_message(chat_id, caption, reply_markup=buttons)
+
+    # No photos, or the CDN links have expired and Telegram refused them.
+    telegram_api.send_message(
+        chat_id,
+        header + bot_ui.render_card(listing, lang, body_chars=3500),
+        reply_markup=bot_ui.listing_buttons(listing, lang),
+    )
+
+
+def _send_listing_page(chat_id: int, lang: str, offset: int) -> None:
+    """Browse published listings inside the chat, for people who would rather
+    not open the Mini App at all."""
+    with SessionLocal() as session:
+        query = (
+            session.query(Listing)
+            .filter(Listing.status == ListingStatus.APPROVED)
+            .order_by(Listing.posted_at.desc().nullslast(), Listing.id.desc())
+        )
+        total = query.count()
+        listings = query.offset(offset).limit(LISTINGS_PER_PAGE).all()
+        for listing in listings:
+            _ = listing.photos  # load before the session closes
+
+        if not listings:
+            key = "no_listings" if offset == 0 else "no_more_listings"
+            telegram_api.send_message(chat_id, i18n.t(key, lang))
+            return
+
+        if offset == 0:
+            telegram_api.send_message(chat_id, i18n.t("latest_intro", lang))
+
+        for listing in listings:
+            _send_listing(chat_id, listing, lang)
+
+    next_offset = offset + LISTINGS_PER_PAGE
+    if next_offset < total:
+        telegram_api.send_message(
+            chat_id,
+            f"{next_offset} / {total}",
+            reply_markup={"inline_keyboard": [[
+                {"text": i18n.t("btn_more", lang), "callback_data": f"latest:{next_offset}"}
+            ]]},
+        )
+
+
+# --- subscriptions ------------------------------------------------------------
+
+def _send_subscription_menu(chat_id: int, telegram_id: int, lang: str) -> None:
+    with SessionLocal() as session:
+        user = session.query(TgUser).filter_by(telegram_id=telegram_id).first()
+        sub = None
+        if user:
+            sub = session.query(SavedFilter).filter_by(user_id=user.id).first()
+        active = bool(sub and sub.is_active)
+
+    toggle = "btn_sub_disable" if active else "btn_sub_enable"
+    rows = [[{"text": i18n.t(toggle, lang), "callback_data": "sub:toggle"}]]
+    rows.append([{"text": i18n.t("btn_back", lang), "callback_data": "menu:main"}])
+
+    status = i18n.t("sub_on" if active else "sub_off", lang)
+    telegram_api.send_message(
+        chat_id,
+        f"{i18n.t('sub_menu_title', lang)}\n\n{status}",
+        reply_markup={"inline_keyboard": rows},
+    )
+
+
+def _toggle_subscription(telegram_id: int) -> bool:
+    """Flip the user's subscription; returns whether it is now active."""
+    with SessionLocal() as session:
+        user = session.query(TgUser).filter_by(telegram_id=telegram_id).first()
+        if not user:
+            user = TgUser(telegram_id=telegram_id)
+            session.add(user)
+            session.flush()
+
+        sub = session.query(SavedFilter).filter_by(user_id=user.id).first()
+        if not sub:
+            # Start from the newest listing so switching on doesn't replay the
+            # whole back catalogue into the user's chat.
+            latest = session.query(func.max(Listing.id)).scalar() or 0
+            sub = SavedFilter(user_id=user.id, is_active=True, last_sent_listing_id=latest)
+            session.add(sub)
+        else:
+            sub.is_active = not sub.is_active
+        session.commit()
+        return sub.is_active
+
+
+def deliver_subscriptions() -> int:
+    """Push newly published listings to everyone subscribed to matching filters.
+
+    Called after each ingest. Delivery is capped per run so one big scrape
+    cannot flood a chat, and last_sent_listing_id makes it idempotent.
+    """
+    sent = 0
+    with SessionLocal() as session:
+        subs = session.query(SavedFilter).filter(SavedFilter.is_active.is_(True)).all()
+        for sub in subs:
+            user = session.get(TgUser, sub.user_id)
+            if not user:
+                continue
+            listings = (
+                session.query(Listing)
+                .filter(Listing.status == ListingStatus.APPROVED)
+                .filter(Listing.id > sub.last_sent_listing_id)
+                .order_by(Listing.id.asc())
+                .limit(SUBSCRIPTION_BATCH_LIMIT)
+                .all()
+            )
+            if not listings:
+                continue
+            for listing in listings:
+                if sub.matches(listing):
+                    _send_listing(
+                        user.telegram_id, listing, user.lang or i18n.DEFAULT_LANG,
+                        prefix=i18n.t("sub_new_listing", user.lang or i18n.DEFAULT_LANG),
+                    )
+                    sent += 1
+                sub.last_sent_listing_id = max(sub.last_sent_listing_id, listing.id)
+        session.commit()
+    return sent
+
+
+# --- admin reporting ----------------------------------------------------------
+
+def _render_stats() -> str:
+    """Operational summary for the admin: is the pipeline healthy, what's live."""
+    now = datetime.utcnow()
+    with SessionLocal() as session:
+        by_status = dict(
+            session.query(Listing.status, func.count(Listing.id)).group_by(Listing.status).all()
+        )
+        by_city = (
+            session.query(Listing.city, func.count(Listing.id))
+            .filter(Listing.status == ListingStatus.APPROVED)
+            .group_by(Listing.city)
+            .order_by(func.count(Listing.id).desc())
+            .all()
+        )
+        by_source = (
+            session.query(Listing.source_channel, func.count(Listing.id))
+            .filter(Listing.status == ListingStatus.APPROVED)
+            .group_by(Listing.source_channel)
+            .order_by(func.count(Listing.id).desc())
+            .all()
+        )
+        last_24h = session.query(Listing).filter(Listing.created_at > now - timedelta(hours=24)).count()
+        last_7d = session.query(Listing).filter(Listing.created_at > now - timedelta(days=7)).count()
+        newest = session.query(func.max(Listing.created_at)).scalar()
+        flagged = session.query(Listing).filter(
+            Listing.needs_review.is_(True), Listing.status == ListingStatus.APPROVED
+        ).count()
+        users = session.query(TgUser).count()
+        subs = session.query(SavedFilter).filter(SavedFilter.is_active.is_(True)).count()
+
+    def n(status):
+        return by_status.get(status, 0)
+
+    lines = [
+        "📊 <b>Статистика</b>",
+        "",
+        "<b>Объявления</b>",
+        f"  ✅ Опубликовано: {n(ListingStatus.APPROVED)}",
+        f"  ⏳ Ждут проверки: {n(ListingStatus.PENDING)}",
+        f"  🚫 Отсеяно: {n(ListingStatus.REJECTED)}",
+        f"  🕒 Устарело: {n(ListingStatus.EXPIRED)}",
+    ]
+    if flagged:
+        lines.append(f"  ⚠️ С пометкой «проверить»: {flagged} → /review")
+
+    lines += ["", "<b>Приток</b>", f"  За 24 часа: {last_24h}", f"  За 7 дней: {last_7d}"]
+    if newest:
+        age_min = int((now - newest).total_seconds() // 60)
+        health = "✅" if age_min < 30 else "⚠️"
+        lines.append(f"  {health} Последнее добавление: {age_min} мин назад")
+    else:
+        lines.append("  ⚠️ Ни одного объявления ещё не добавлено")
+
+    if by_city:
+        lines += ["", "<b>По городам</b>"]
+        for city, count in by_city:
+            lines.append(f"  {bot_ui._label(bot_ui.CITY_LABELS, city, 'ru')}: {count}")
+
+    if by_source:
+        lines += ["", "<b>По источникам</b>"]
+        for channel, count in by_source:
+            lines.append(f"  @{channel or 'вручную'}: {count}")
+
+    lines += ["", "<b>Аудитория</b>", f"  Пользователей: {users}", f"  Подписок: {subs}"]
+    return "\n".join(lines)
+
+
+def _render_spam_report() -> str:
+    """Who is currently throttled, so abuse is visible rather than silent."""
+    now = datetime.utcnow()
+    with SessionLocal() as session:
+        blocked = (
+            session.query(RateLimitState)
+            .filter(RateLimitState.blocked_until.isnot(None), RateLimitState.blocked_until > now)
+            .order_by(RateLimitState.blocked_until.desc())
+            .limit(20)
+            .all()
+        )
+        repeat = (
+            session.query(RateLimitState)
+            .filter(RateLimitState.violation_count > 0)
+            .order_by(RateLimitState.violation_count.desc())
+            .limit(10)
+            .all()
+        )
+
+    lines = ["🛡 <b>Защита от флуда</b>", ""]
+    if blocked:
+        lines.append("<b>Сейчас в паузе</b>")
+        for s in blocked:
+            mins = int((s.blocked_until - now).total_seconds() // 60) + 1
+            lines.append(f"  id {s.telegram_id} · {s.action} · ещё {mins} мин")
+    else:
+        lines.append("Сейчас никто не заблокирован. ✅")
+
+    if repeat:
+        lines += ["", "<b>Повторные нарушения</b>"]
+        for s in repeat:
+            lines.append(f"  id {s.telegram_id} · {s.action} · нарушений: {s.violation_count}")
+
+    lines += [
+        "",
+        "<i>Блокировки временные и снимаются сами; повторные нарушения "
+        "обнуляются через сутки нормального поведения. Постоянных банов нет.</i>",
+    ]
+    return "\n".join(lines)
+
+
+def _send_review_queue(chat_id: int, lang: str, flagged_only: bool) -> None:
+    """Show listings worth a second look: auto-flagged, or awaiting approval."""
+    with SessionLocal() as session:
+        query = session.query(Listing)
+        if flagged_only:
+            query = query.filter(
+                Listing.needs_review.is_(True), Listing.status == ListingStatus.APPROVED
+            )
+        else:
+            query = query.filter(Listing.status == ListingStatus.PENDING)
+        listing = query.order_by(Listing.created_at.asc()).first()
+        remaining = query.count()
+        if listing:
+            _ = listing.photos
+
+    if not listing:
+        telegram_api.send_message(chat_id, "Очередь пуста. 👍")
+        return
+
+    note = f"⚠️ {html.escape(listing.quality_note)}\n" if listing.quality_note else ""
+    prefix = f"{note}<b>#{listing.id}</b> · осталось: {remaining}"
+    _send_listing(chat_id, listing, lang, prefix=prefix)
+    telegram_api.send_message(
+        chat_id,
+        f"Что сделать с #{listing.id}?",
+        reply_markup=telegram_api.approve_reject_buttons(listing.id),
+    )
 
 
 def _create_manual_listing(message: dict, content: str) -> None:
@@ -558,7 +1004,10 @@ def _create_manual_listing(message: dict, content: str) -> None:
 
     with SessionLocal() as session:
         listing = Listing(
+            # User submissions are never auto-published: unlike the curated
+            # channels, anyone can send anything here.
             status=ListingStatus.PENDING,
+            content_hash=quality.content_hash(content),
             source_type=SourceType.FACEBOOK if url_match and "facebook" in url_match.group(0) else SourceType.MANUAL,
             source_url=source_url,
             city=extracted.city,
@@ -587,45 +1036,118 @@ def _create_manual_listing(message: dict, content: str) -> None:
     for admin_id in ADMIN_TELEGRAM_IDS:
         telegram_api.send_message(
             admin_id,
-            f"Новое объявление #{listing_id} ждёт модерации:\n\n{html.escape(content[:600])}",
+            f"➕ Новое объявление #{listing_id} от пользователя:\n\n{html.escape(content[:600])}",
             reply_markup=telegram_api.approve_reject_buttons(listing_id),
         )
 
 
 def _handle_callback(callback_query: dict) -> None:
-    user_id = callback_query["from"]["id"]
-    if not _is_admin(user_id):
-        telegram_api.answer_callback_query(callback_query["id"], "Только для модераторов.")
+    sender = callback_query["from"]
+    user_id = sender["id"]
+    message = callback_query.get("message") or {}
+    chat_id = message.get("chat", {}).get("id", user_id)
+    query_id = callback_query["id"]
+    data = callback_query.get("data", "")
+    lang = _user_lang(sender)
+    is_admin_user = _is_admin(user_id)
+
+    # --- public actions ---
+    if data == "menu:main":
+        telegram_api.answer_callback_query(query_id)
+        _send_main_menu(chat_id, lang, is_admin_user)
         return
 
-    # callback_data is attacker-controllable in principle, so parse defensively
-    # instead of letting a malformed value raise inside the webhook.
-    parts = callback_query.get("data", "").split(":")
-    if len(parts) != 2 or parts[0] not in ("approve", "reject") or not parts[1].isdigit():
-        telegram_api.answer_callback_query(callback_query["id"], "Некорректная команда.")
+    if data == "help:show":
+        telegram_api.answer_callback_query(query_id)
+        telegram_api.send_message(chat_id, i18n.t("help_text", lang))
         return
-    action, listing_id = parts[0], int(parts[1])
 
-    with SessionLocal() as session:
-        listing = session.get(Listing, listing_id)
-        if not listing:
-            telegram_api.answer_callback_query(callback_query["id"], "Объявление не найдено.")
+    if data == "submit:how":
+        telegram_api.answer_callback_query(query_id)
+        telegram_api.send_message(chat_id, i18n.t("submit_prompt", lang))
+        return
+
+    if data == "lang:menu":
+        telegram_api.answer_callback_query(query_id)
+        telegram_api.send_message(chat_id, i18n.t("choose_language", lang),
+                                  reply_markup=bot_ui.language_keyboard(lang))
+        return
+
+    if data.startswith("lang:"):
+        chosen = data.split(":", 1)[1]
+        if chosen in i18n.SUPPORTED_LANGS:
+            _set_user_lang(user_id, chosen)
+            telegram_api.answer_callback_query(query_id, i18n.t("language_set", chosen))
+            _send_main_menu(chat_id, chosen, is_admin_user)
+        else:
+            telegram_api.answer_callback_query(query_id)
+        return
+
+    if data.startswith("latest:"):
+        offset = data.split(":", 1)[1]
+        telegram_api.answer_callback_query(query_id)
+        _send_listing_page(chat_id, lang, offset=int(offset) if offset.isdigit() else 0)
+        return
+
+    if data == "sub:menu":
+        telegram_api.answer_callback_query(query_id)
+        _send_subscription_menu(chat_id, user_id, lang)
+        return
+
+    if data == "sub:toggle":
+        now_active = _toggle_subscription(user_id)
+        telegram_api.answer_callback_query(query_id, i18n.t("sub_on" if now_active else "sub_off", lang))
+        _send_subscription_menu(chat_id, user_id, lang)
+        return
+
+    # --- admin actions ---
+    if data == "admin:menu":
+        if not is_admin_user:
+            telegram_api.answer_callback_query(query_id, i18n.t("admins_only", lang))
             return
-        listing.status = ListingStatus.APPROVED if action == "approve" else ListingStatus.REJECTED
-        session.commit()
+        telegram_api.answer_callback_query(query_id)
+        telegram_api.send_message(
+            chat_id,
+            "🛠 <b>Админ-панель</b>\n\n"
+            "/stats — статистика\n"
+            "/review — объявления с пометкой «проверить»\n"
+            "/pending — присланные пользователями, ждут решения\n"
+            "/spam — кто сейчас ограничен за флуд",
+        )
+        return
 
-    message = callback_query["message"]
-    chat_id = message["chat"]["id"]
-    suffix = "✅ Одобрено" if action == "approve" else "❌ Отклонено"
+    if data.startswith(("approve:", "reject:")):
+        if not is_admin_user:
+            telegram_api.answer_callback_query(query_id, i18n.t("admins_only", lang))
+            return
 
-    # The queue message may be a photo (caption) or plain text — editing the
-    # wrong one fails, so just strip the buttons to mark it handled.
-    telegram_api.edit_message_reply_markup(chat_id, message["message_id"], None)
-    telegram_api.send_message(chat_id, f"Объявление #{listing_id}: {suffix}")
-    telegram_api.answer_callback_query(callback_query["id"], suffix)
+        # callback_data is attacker-controllable in principle, so parse
+        # defensively instead of letting a malformed value raise.
+        parts = data.split(":")
+        if len(parts) != 2 or not parts[1].isdigit():
+            telegram_api.answer_callback_query(query_id, "Некорректная команда.")
+            return
+        action, listing_id = parts[0], int(parts[1])
 
-    # Keep the moderator moving through the queue without retyping /pending.
-    _send_next_pending(chat_id)
+        with SessionLocal() as session:
+            listing = session.get(Listing, listing_id)
+            if not listing:
+                telegram_api.answer_callback_query(query_id, "Объявление не найдено.")
+                return
+            if action == "approve":
+                listing.status = ListingStatus.APPROVED
+                listing.needs_review = False
+            else:
+                listing.status = ListingStatus.REJECTED
+            session.commit()
+
+        suffix = "✅ Опубликовано" if action == "approve" else "❌ Скрыто"
+        telegram_api.edit_message_reply_markup(chat_id, message.get("message_id"), None)
+        telegram_api.answer_callback_query(query_id, suffix)
+        telegram_api.send_message(chat_id, f"#{listing_id}: {suffix}")
+        return
+
+    telegram_api.answer_callback_query(query_id)
 
 
 if __name__ == "__main__":

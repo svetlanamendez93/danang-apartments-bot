@@ -2,8 +2,8 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>Аренда жилья — Дананг и др.</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Аренда жилья во Вьетнаме</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="style.css" />
@@ -11,91 +11,102 @@
 <body>
   <div id="app">
     <header id="topbar">
-      <button id="filtersToggle" aria-label="Фильтры">☰ Фильтры</button>
-      <span id="resultCount"></span>
+      <button id="filtersToggle" class="tb-btn">
+        <span class="tb-icon">☰</span><span data-i18n="filters">Фильтры</span>
+        <span id="activeFilterCount" class="badge hidden">0</span>
+      </button>
+
+      <div id="viewToggle" class="segmented">
+        <button data-view="map" class="active" data-i18n="map">Карта</button>
+        <button data-view="list" data-i18n="list">Список</button>
+      </div>
+
+      <button id="langToggle" class="tb-btn lang-btn" aria-label="Language">🌐&nbsp;<span id="langCode">RU</span></button>
     </header>
 
+    <div id="resultBar"><span id="resultCount"></span></div>
+
+    <main id="mapWrap"><div id="map"></div></main>
+    <section id="listView" class="hidden"></section>
+
+    <!-- filters -->
+    <div id="filtersScrim" class="scrim hidden"></div>
     <aside id="filtersPanel">
-      <h2>Фильтры</h2>
+      <div class="panel-head">
+        <h2 data-i18n="filters">Фильтры</h2>
+        <button id="filtersClose" class="close-btn" aria-label="×">✕</button>
+      </div>
 
-      <label>Город
-        <select id="f-city">
-          <option value="">Любой</option>
-          <option value="da_nang">Дананг</option>
-          <option value="nha_trang">Нячанг</option>
-          <option value="ho_chi_minh">Хошимин</option>
-          <option value="hanoi">Ханой</option>
-          <option value="hoi_an">Хойан</option>
-        </select>
-      </label>
-
-      <label>Бюджет в месяц, $
-        <div class="range-row">
-          <input type="number" id="f-price-min" placeholder="от" min="0" />
-          <input type="number" id="f-price-max" placeholder="до" min="0" />
+      <div class="panel-body">
+        <div class="field">
+          <label data-i18n="city">Город</label>
+          <div class="chips" id="f-city" data-multi="true"></div>
         </div>
-      </label>
 
-      <label>Комнаты
-        <select id="f-rooms">
-          <option value="">Любое</option>
-          <option value="studio">Студия</option>
-          <option value="1">1</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-          <option value="4">4+</option>
-        </select>
-      </label>
+        <div class="field">
+          <label data-i18n="budget">Бюджет в месяц, $</label>
+          <div class="range-row">
+            <input type="number" id="f-price-min" min="0" step="50" data-i18n-ph="from" placeholder="от" />
+            <span class="dash">—</span>
+            <input type="number" id="f-price-max" min="0" step="50" data-i18n-ph="to" placeholder="до" />
+          </div>
+        </div>
 
-      <label>Тип жилья
-        <select id="f-type">
-          <option value="">Любое</option>
-          <option value="apartment">Квартира</option>
-          <option value="room">Комната</option>
-          <option value="house">Дом</option>
-          <option value="villa">Вилла</option>
-        </select>
-      </label>
+        <div class="field">
+          <label data-i18n="rooms">Комнаты</label>
+          <div class="chips" id="f-rooms" data-multi="true"></div>
+        </div>
 
-      <label>Качество ремонта
-        <select id="f-renovation">
-          <option value="">Любое</option>
-          <option value="needs_repair">Требует ремонта</option>
-          <option value="standard">Стандартный</option>
-          <option value="good">Хороший</option>
-          <option value="premium">Премиум</option>
-        </select>
-      </label>
+        <div class="field">
+          <label data-i18n="property_type">Тип жилья</label>
+          <div class="chips" id="f-type" data-multi="true"></div>
+        </div>
 
-      <label>Питомцы
-        <select id="f-pets">
-          <option value="">Неважно</option>
-          <option value="allowed">Можно</option>
-          <option value="not_allowed">Нельзя</option>
-        </select>
-      </label>
+        <div class="field">
+          <label data-i18n="renovation">Качество ремонта</label>
+          <div class="chips" id="f-renovation" data-multi="true"></div>
+        </div>
 
-      <button id="applyFilters">Показать</button>
-      <button id="resetFilters" class="secondary">Сбросить</button>
+        <div class="field">
+          <label data-i18n="pets">Питомцы</label>
+          <div class="chips" id="f-pets" data-multi="false"></div>
+        </div>
+      </div>
+
+      <div class="panel-foot">
+        <button id="resetFilters" class="btn-secondary" data-i18n="reset">Сбросить</button>
+        <button id="applyFilters" class="btn-primary" data-i18n="show">Показать</button>
+      </div>
     </aside>
 
-    <main id="map"></main>
+    <!-- language sheet -->
+    <div id="langScrim" class="scrim hidden"></div>
+    <div id="langSheet" class="sheet">
+      <div class="panel-head">
+        <h2 data-i18n="language">Язык</h2>
+        <button id="langClose" class="close-btn" aria-label="×">✕</button>
+      </div>
+      <div class="lang-list" id="langList"></div>
+    </div>
 
+    <!-- listing detail -->
     <div id="listingModal" class="modal hidden">
       <div class="modal-content">
-        <button id="closeModal" class="close-btn" aria-label="Закрыть">✕</button>
-        <div id="gallery"></div>
-        <div id="listingDetails"></div>
+        <button id="closeModal" class="close-btn floating" aria-label="×">✕</button>
+        <div id="gallery" class="gallery"></div>
+        <div id="galleryDots" class="dots"></div>
+        <div id="listingDetails" class="details"></div>
       </div>
     </div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // Where the Flask API lives. Set here rather than in app.js so redeploying
-    // the Mini App to a different backend is a one-line change in one file.
+    // Where the Flask API lives. Set here rather than in app.js so pointing the
+    // Mini App at a different backend is a one-line change in one file.
     window.API_BASE_URL = "https://svetlanamendez93.pythonanywhere.com";
   </script>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -102,6 +102,13 @@ class Source(Base):
     last_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Curated channels publish straight to the map: holding a rental listing in
+    # a review queue makes it stale, which defeats the point of scraping every
+    # few minutes. Quality is defended by the automatic checks in
+    # server/quality.py plus after-the-fact review, not by a human gate.
+    # User submissions (SourceType.MANUAL/FACEBOOK) are never auto-published.
+    auto_publish: Mapped[bool] = mapped_column(Boolean, default=True)
+
 
 class Listing(Base):
     __tablename__ = "listings"
@@ -143,6 +150,15 @@ class Listing(Base):
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # исходный текст поста, для отладки экстрактора
     contact: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Fingerprint of the normalised text, used to spot the same flat reposted
+    # later or cross-posted to another channel. Indexed because every ingested
+    # post is looked up by it.
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    # Set when the automatic checks published something they weren't sure about
+    # (no price, implausibly cheap). Surfaced to admins via /review.
+    quality_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+
     posted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -168,29 +184,64 @@ class TgUser(Base):
     # BigInteger: Telegram user ids have outgrown the 32-bit signed range.
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Seeded from the client's Telegram language on first contact, then
+    # overridden by an explicit choice via /language.
+    lang: Mapped[str] = mapped_column(String(8), default="ru")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     saved_filters: Mapped[list["SavedFilter"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class SavedFilter(Base):
-    """A filter subscription — user gets notified when a matching listing is approved."""
+    """A standing subscription: new matching listings are pushed to the user.
+
+    Some people would rather not open the map at all and just be told when
+    something matching turns up, so this is offered alongside the Mini App
+    rather than instead of it. Multi-value fields are stored comma-separated
+    to mirror the multi-select filters in the Mini App.
+    """
 
     __tablename__ = "saved_filters"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("tg_users.id"))
 
-    city: Mapped[City | None] = mapped_column(Enum(City), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    cities: Mapped[str | None] = mapped_column(String(255), nullable=True)
     price_min_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     price_max_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
-    rooms: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    property_type: Mapped[PropertyType | None] = mapped_column(Enum(PropertyType), nullable=True)
+    rooms: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    property_types: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pets_policy: Mapped[PetsPolicy | None] = mapped_column(Enum(PetsPolicy), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Ensures a listing is pushed at most once per subscription, even if the
+    # ingest that created it is retried.
+    last_sent_listing_id: Mapped[int] = mapped_column(Integer, default=0)
 
     user: Mapped[TgUser] = relationship(back_populates="saved_filters")
+
+    def matches(self, listing: "Listing") -> bool:
+        if self.cities and listing.city.value not in self.cities.split(","):
+            return False
+        if self.rooms and (listing.rooms or "") not in self.rooms.split(","):
+            return False
+        if self.property_types:
+            ptype = listing.property_type.value if listing.property_type else ""
+            if ptype not in self.property_types.split(","):
+                return False
+        if self.pets_policy and listing.pets_policy != self.pets_policy:
+            return False
+        # Budget overlap, matching the semantics of the map's price filter.
+        if self.price_min_usd is not None:
+            if listing.price_max_usd is None or listing.price_max_usd < self.price_min_usd:
+                return False
+        if self.price_max_usd is not None:
+            if listing.price_min_usd is None or listing.price_min_usd > self.price_max_usd:
+                return False
+        return True
 
 
 class RateLimitState(Base):

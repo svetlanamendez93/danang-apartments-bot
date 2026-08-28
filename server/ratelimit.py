@@ -15,6 +15,8 @@ Two independent checks are used (see server/app.py):
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -22,6 +24,37 @@ from sqlalchemy.orm import Session
 from db.models import RateLimitState
 
 VIOLATION_DECAY = timedelta(hours=24)
+
+# --- HTTP rate limiting (in-memory) -------------------------------------------
+#
+# The Mini App's API is public and unauthenticated, and the free PythonAnywhere
+# tier bills a daily CPU allowance — a single script hammering /listings could
+# exhaust it and take the site down for everyone. This is a cheap per-IP
+# throttle in process memory: no DB write per request (which would itself cost
+# CPU), and losing the counters when the worker restarts is harmless for what
+# it defends against.
+
+_HTTP_HITS: dict[str, list[float]] = {}
+_HTTP_LOCK = threading.Lock()
+_HTTP_MAX_TRACKED_IPS = 5000
+
+
+def check_http(ip: str, limit: int, window_seconds: int) -> bool:
+    """True if this IP may make another request right now."""
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    with _HTTP_LOCK:
+        hits = [t for t in _HTTP_HITS.get(ip, ()) if t > cutoff]
+        allowed = len(hits) < limit
+        if allowed:
+            hits.append(now)
+        _HTTP_HITS[ip] = hits
+
+        # Bound memory: an attacker rotating IPs must not grow this forever.
+        if len(_HTTP_HITS) > _HTTP_MAX_TRACKED_IPS:
+            for stale_ip in [k for k, v in _HTTP_HITS.items() if not v or v[-1] < cutoff]:
+                del _HTTP_HITS[stale_ip]
+    return allowed
 
 
 def _get_or_create(session: Session, telegram_id: int, action: str) -> RateLimitState:
@@ -44,13 +77,14 @@ def check(
     limit: int,
     window_seconds: int,
     block_durations_seconds: list[int] | None = None,
-) -> tuple[bool, str | None]:
-    """Returns (allowed, message).
+) -> tuple[bool, int | None]:
+    """Returns (allowed, minutes_to_wait).
 
-    `message` is non-None only the moment a new block/warning starts (so the
-    caller sends it once, not on every ignored message afterwards).
-    If `block_durations_seconds` is None, exceeding the limit just silently
-    drops the message with no block and no reply at all (used for "message").
+    `minutes_to_wait` is non-None only at the moment a new block starts, so the
+    caller warns once rather than on every message that follows. The caller
+    renders the text, since it knows the user's language.
+    If `block_durations_seconds` is None, exceeding the limit silently drops
+    the message with no block and no reply at all (used for "message").
     """
     now = datetime.utcnow()
     state = _get_or_create(session, telegram_id, action)
@@ -82,7 +116,4 @@ def check(
     state.window_count = 0
     session.commit()
 
-    minutes = max(1, duration // 60)
-    return False, (
-        f"Слишком много запросов подряд. Пожалуйста, подождите {minutes} мин. и попробуйте снова."
-    )
+    return False, max(1, duration // 60)

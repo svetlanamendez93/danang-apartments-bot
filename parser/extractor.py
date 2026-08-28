@@ -23,10 +23,13 @@ from db.models import City, PetsPolicy, PropertyType, RenovationQuality
 # moderator sees and can overwrite, not a quoted price.
 VND_PER_USD = 26_000
 
-# Monthly rents outside this band are almost certainly not rents — they are
-# phone numbers, areas, distances or years that happened to sit next to a
-# currency word. Discarding them beats showing a wrong price.
-MIN_PLAUSIBLE_USD = 50
+# Figures outside this band are almost certainly not rents — they are phone
+# numbers, areas, distances or years that happened to sit next to a currency
+# word. Deliberately wider than any believable rent: judging whether a price is
+# *credible* belongs to server/quality.py, which flags scam bait. If this floor
+# were set at a realistic rent, a $45 "beachfront villa" would be dropped here
+# as unparseable and the scam check downstream would never see it.
+MIN_PLAUSIBLE_USD = 20
 MAX_PLAUSIBLE_USD = 20_000
 
 # A number that may carry thousands separators: 1,400 / 1.400 / 1 400 / 540.

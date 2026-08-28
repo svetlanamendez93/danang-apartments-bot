@@ -54,6 +54,33 @@ def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | 
     return _post("sendPhoto", payload, timeout=20)
 
 
+def send_media_group(chat_id: int, photo_urls: list[str], caption: str) -> dict | None:
+    """Send up to 10 photos as one album, with the caption on the first.
+
+    A listing usually comes with the whole photo set from the original post,
+    and sending them one by one would bury the chat; an album keeps them as a
+    single swipeable unit. Telegram allows at most 10 items per group.
+    """
+    media = []
+    for i, url in enumerate(photo_urls[:10]):
+        item = {"type": "photo", "media": url}
+        if i == 0 and caption:
+            item["caption"] = caption
+            item["parse_mode"] = "HTML"
+        media.append(item)
+    if not media:
+        return None
+    return _post("sendMediaGroup", {"chat_id": chat_id, "media": media}, timeout=30)
+
+
+def set_my_commands(commands: list[dict], language_code: str | None = None) -> dict | None:
+    """Register the command list Telegram shows in its own menu button."""
+    payload: dict = {"commands": commands}
+    if language_code:
+        payload["language_code"] = language_code
+    return _post("setMyCommands", payload)
+
+
 def edit_message_text(chat_id: int, message_id: int, text: str) -> None:
     _post("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text})
 
