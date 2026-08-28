@@ -49,13 +49,23 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "🗺 Open the listings map",
         "vi": "🗺 Mở bản đồ tin đăng",
     },
-    "btn_language": {"ru": "🌐 Язык", "en": "🌐 Language", "vi": "🌐 Ngôn ngữ"},
+    # Deliberately identical in all three languages. Whoever needs this button
+    # is by definition looking at a language they may not read — if the label
+    # were translated, someone who got the wrong language on first contact
+    # would have no word they recognise to aim for.
+    "btn_language": {
+        "ru": "🌐 Язык · Language · Ngôn ngữ",
+        "en": "🌐 Язык · Language · Ngôn ngữ",
+        "vi": "🌐 Язык · Language · Ngôn ngữ",
+    },
     "btn_help": {"ru": "❓ Помощь", "en": "❓ Help", "vi": "❓ Trợ giúp"},
     "btn_submit": {"ru": "➕ Добавить объявление", "en": "➕ Submit a listing", "vi": "➕ Đăng tin"},
+    # Same reasoning as btn_language: the prompt has to be legible to someone
+    # who is here precisely because they can't read the current language.
     "choose_language": {
-        "ru": "Выберите язык:",
-        "en": "Choose your language:",
-        "vi": "Chọn ngôn ngữ:",
+        "ru": "🌐 Выберите язык · Choose your language · Chọn ngôn ngữ",
+        "en": "🌐 Выберите язык · Choose your language · Chọn ngôn ngữ",
+        "vi": "🌐 Выберите язык · Choose your language · Chọn ngôn ngữ",
     },
     "language_set": {
         "ru": "Готово, язык переключён на русский.",

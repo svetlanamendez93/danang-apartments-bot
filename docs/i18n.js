@@ -18,7 +18,10 @@ const I18N = {
   property_type: { ru: "Тип жилья",         en: "Property type",   vi: "Loại nhà" },
   renovation:    { ru: "Качество ремонта",  en: "Condition",       vi: "Tình trạng" },
   pets:          { ru: "Питомцы",           en: "Pets",            vi: "Thú cưng" },
-  language:      { ru: "Язык",              en: "Language",        vi: "Ngôn ngữ" },
+  // Deliberately identical in all three languages: whoever opens this is by
+  // definition looking at a language they may not read, so the heading has to
+  // contain a word each of them recognises.
+  language:      { ru: "Язык · Language · Ngôn ngữ", en: "Язык · Language · Ngôn ngữ", vi: "Язык · Language · Ngôn ngữ" },
   from:          { ru: "от",                en: "from",            vi: "từ" },
   to:            { ru: "до",                en: "to",              vi: "đến" },
   reset:         { ru: "Сбросить",          en: "Reset",           vi: "Đặt lại" },
