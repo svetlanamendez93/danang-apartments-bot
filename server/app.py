@@ -44,12 +44,15 @@ from db.models import (
     Source,
     SourceType,
     TgUser,
+    UserListing,
+    UserListingState,
     init_db,
 )
 from parser.cleaner import clean_post_text
 from parser.extractor import extract
 from parser.places import fallback_coords, find_address_text, find_place
 from server import bot_ui, i18n, quality, ratelimit, telegram_api
+from server.tg_auth import verify_init_data
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +107,8 @@ def add_cors_headers(response):
     stays empty. Only the public read endpoints need to be reachable that way;
     admin/ingest routes are guarded by tokens regardless of origin."""
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Telegram-Init-Data"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
 
@@ -180,6 +183,38 @@ def parse_str_list(raw: str | None, allowed: set[str]) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip() in allowed]
 
 
+class _NoPlace:
+    """Stand-in so an unrecognised place yields address_text=None cleanly."""
+    name = None
+
+
+_NO_PLACE = _NoPlace()
+
+
+def _resolve_position(
+    given: dict, text: str, city: City, source_url: str
+) -> tuple[float | None, float | None, bool]:
+    """Where to put this listing, and whether that position is a real one.
+
+    Precedence, best first:
+      1. coordinates the source states outright (Chotot, or a Google Maps link
+         the scraper already resolved) — exact
+      2. coordinates the scraper geocoded from the written address — exact
+      3. a district or complex recognised from the text — neighbourhood level
+      4. the city's rental area, jittered — a guess, and flagged as one
+    """
+    lat, lng = given.get("lat"), given.get("lng")
+    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+        return float(lat), float(lng), False
+
+    place = find_place(text, city if city != City.OTHER else None)
+    if place:
+        return place.lat, place.lng, False
+
+    fallback_lat, fallback_lng = fallback_coords(city, source_url)
+    return fallback_lat, fallback_lng, True
+
+
 def listing_to_dict(listing: Listing) -> dict:
     return {
         "id": listing.id,
@@ -198,6 +233,13 @@ def listing_to_dict(listing: Listing) -> dict:
         "renovation_quality": listing.renovation_quality.value if listing.renovation_quality else None,
         "pets_policy": listing.pets_policy.value,
         "area_sqm": listing.area_sqm,
+        "sea_distance_m": listing.sea_distance_m,
+        # Computed here so every client shows the same number, and so it can be
+        # sorted on later without each one reinventing the arithmetic.
+        "price_per_sqm_usd": (
+            round(listing.price_min_usd / listing.area_sqm, 1)
+            if listing.price_min_usd and listing.area_sqm else None
+        ),
         "floor": listing.floor,
         "furnished": listing.furnished,
         "has_parking": listing.has_parking,
@@ -279,6 +321,60 @@ def get_listing(listing_id: int):
         if not listing or listing.status != ListingStatus.APPROVED:
             raise NotFound()
         return jsonify(listing_to_dict(listing))
+
+
+# --- per-user state (favourites, already-viewed) ------------------------------
+#
+# Identity comes from Telegram's signed initData, never from a user id in the
+# request: otherwise anyone could read or edit anyone else's shortlist.
+
+def _require_viewer() -> int:
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user = verify_init_data(init_data)
+    if not user:
+        raise Forbidden("invalid Telegram init data")
+    return int(user["id"])
+
+
+@app.get("/me/listings")
+def my_listing_state():
+    """Which listings this viewer has saved or already seen."""
+    viewer = _require_viewer()
+    with SessionLocal() as session:
+        rows = session.query(UserListing).filter_by(telegram_id=viewer).all()
+        return jsonify({
+            "saved": [r.listing_id for r in rows if r.state == UserListingState.SAVED],
+            "viewed": [r.listing_id for r in rows if r.state == UserListingState.VIEWED],
+        })
+
+
+@app.post("/me/listings/<int:listing_id>/<state>")
+def set_my_listing_state(listing_id: int, state: str):
+    viewer = _require_viewer()
+    try:
+        wanted = UserListingState(state)
+    except ValueError:
+        raise NotFound()
+
+    on = bool((request.get_json(silent=True) or {}).get("on", True))
+    with SessionLocal() as session:
+        if not session.get(Listing, listing_id):
+            raise NotFound()
+        row = (
+            session.query(UserListing)
+            .filter_by(telegram_id=viewer, listing_id=listing_id, state=wanted)
+            .first()
+        )
+        if on and not row:
+            session.add(UserListing(telegram_id=viewer, listing_id=listing_id, state=wanted))
+        elif not on and row:
+            session.delete(row)
+        try:
+            session.commit()
+        except IntegrityError:
+            # Double-tap on a slow connection; the desired state already holds.
+            session.rollback()
+    return jsonify({"ok": True, "state": state, "on": on})
 
 
 # --- moderation API (called by the bot webhook and/or an admin directly) -----
@@ -366,24 +462,21 @@ def ingest():
     body = request.get_json(force=True)
     channel_username = body["channel_username"]
     posts = body.get("posts", [])
+    source_type = coerce_enum(SourceType, body.get("source_type")) or SourceType.TELEGRAM
 
-    published = 0
-    held = 0
-    flagged = 0
-    duplicates = 0
+    published = held = flagged = duplicates = 0
 
     with SessionLocal() as session:
         source = session.query(Source).filter_by(channel_username=channel_username).first()
         if not source:
-            source = Source(platform=SourceType.TELEGRAM, channel_username=channel_username)
+            source = Source(platform=source_type, channel_username=channel_username)
             session.add(source)
             session.flush()
 
         max_message_id = source.last_message_id or 0
         for post in posts:
-            source_url = f"https://t.me/{channel_username}/{post['message_id']}"
-            exists = session.query(Listing).filter_by(source_url=source_url).first()
-            if exists:
+            source_url = post.get("url") or f"https://t.me/{channel_username}/{post['message_id']}"
+            if session.query(Listing).filter_by(source_url=source_url).first():
                 continue
 
             text = post.get("text", "") or ""
@@ -391,7 +484,7 @@ def ingest():
 
             # The same flat is routinely cross-posted to several channels and
             # reposted weeks later; without this the map fills with copies.
-            if session.query(Listing).filter_by(content_hash=fingerprint).first():
+            if fingerprint and session.query(Listing).filter_by(content_hash=fingerprint).first():
                 duplicates += 1
                 max_message_id = max(max_message_id, post["message_id"])
                 continue
@@ -400,10 +493,19 @@ def ingest():
                 text,
                 default_city=CHANNEL_DEFAULT_CITY.get(channel_username.lower()),
             )
-            verdict = quality.assess(text, extracted.city, extracted.price_min_usd, extracted.rooms)
-            place = find_place(text, extracted.city if extracted.city != City.OTHER else None)
-            address = find_address_text(text) or (place.name if place else None)
 
+            # Sources like Chotot state price, rooms, area and coordinates
+            # outright. Those are facts, so they override anything the text
+            # extractor guessed; fields they omit still fall back to it.
+            given = post.get("structured") or {}
+            city = coerce_enum(City, given.get("city")) or extracted.city
+            price_min = given.get("price_min_usd", extracted.price_min_usd)
+            price_max = given.get("price_max_usd") or price_min or extracted.price_max_usd
+            rooms = given.get("rooms") or extracted.rooms
+            area_sqm = given.get("area_sqm") or extracted.area_sqm
+            property_type = coerce_enum(PropertyType, given.get("property_type")) or extracted.property_type
+
+            verdict = quality.assess(text, city, price_min, rooms)
             if not source.auto_publish:
                 status = ListingStatus.PENDING
             elif verdict.publish:
@@ -418,33 +520,35 @@ def ingest():
             elif status == ListingStatus.REJECTED:
                 held += 1
 
-            # A recognised district or complex is a real position; the jittered
-            # city centre is only used when nothing at all was identified.
-            if place:
-                lat, lng = place.lat, place.lng
-            else:
-                lat, lng = fallback_coords(extracted.city, source_url)
+            lat, lng, approximate = _resolve_position(given, text, city, source_url)
+            address = (
+                given.get("address_text")
+                or find_address_text(text)
+                or (find_place(text, city if city != City.OTHER else None) or _NO_PLACE).name
+            )
+
             listing = Listing(
                 status=status,
-                address_text=address,
-                location_is_approximate=place is None,
                 content_hash=fingerprint,
                 quality_note=verdict.reason,
                 needs_review=verdict.needs_review,
-                source_type=SourceType.TELEGRAM,
+                source_type=source_type,
                 source_channel=channel_username,
                 source_url=source_url,
                 source_message_id=post["message_id"],
-                city=extracted.city,
+                city=city,
+                address_text=address,
+                location_is_approximate=approximate,
                 lat=lat,
                 lng=lng,
-                price_min_usd=extracted.price_min_usd,
-                price_max_usd=extracted.price_max_usd,
-                rooms=extracted.rooms,
-                property_type=extracted.property_type,
+                price_min_usd=price_min,
+                price_max_usd=price_max,
+                rooms=rooms,
+                property_type=property_type,
                 renovation_quality=extracted.renovation_quality,
                 pets_policy=extracted.pets_policy,
-                area_sqm=extracted.area_sqm,
+                area_sqm=area_sqm,
+                sea_distance_m=extracted.sea_distance_m,
                 # Cleaned for display; raw_text keeps the post verbatim.
                 description=clean_post_text(text),
                 raw_text=text,
@@ -1066,6 +1170,7 @@ def _create_manual_listing(message: dict, content: str) -> None:
             renovation_quality=extracted.renovation_quality,
             pets_policy=extracted.pets_policy,
             area_sqm=extracted.area_sqm,
+            sea_distance_m=extracted.sea_distance_m,
             description=content,
             raw_text=content,
             contact=f"@{username}" if username else str(chat_id),

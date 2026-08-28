@@ -134,10 +134,24 @@ _COMPILED: list[tuple[Place, list[re.Pattern]]] = [
 ]
 
 # An explicitly labelled address line, which beats any guess from the body.
+# "adress" included deliberately: the misspelling is common in these posts.
 _ADDRESS_LABEL = re.compile(
-    r"(?:address|адрес|địa\s*chỉ|расположение|location)\s*[:：]\s*(.{3,80})",
+    r"(?:address|adress|адрес|địa\s*chỉ|расположение|location)\s*[:：]\s*(.{3,80})",
     re.IGNORECASE,
 )
+
+# Posts very often paste a Google Maps link instead of writing an address.
+# That link is the exact location — better than anything text parsing can do —
+# so it is picked out separately and resolved by the scraper, which (unlike the
+# server) has unrestricted outbound internet.
+_MAPS_LINK = re.compile(
+    r"https?://(?:maps\.app\.goo\.gl/\S+|goo\.gl/maps/\S+"
+    r"|(?:www\.)?google\.[a-z.]+/maps/\S+|maps\.google\.[a-z.]+/\S+)",
+    re.IGNORECASE,
+)
+
+# Coordinates embedded in a full Google Maps URL: /@16.05,108.24,17z or ?q=lat,lng
+_MAPS_COORDS = re.compile(r"[@=](-?\d{1,2}\.\d{3,}),\s*(-?\d{2,3}\.\d{3,})")
 
 
 def find_place(text: str, city_hint: City | None = None) -> Place | None:
@@ -165,14 +179,47 @@ def find_place(text: str, city_hint: City | None = None) -> Place | None:
 
 
 def find_address_text(text: str) -> str | None:
-    """The human-readable address to show on the card, if the post labels one."""
-    m = _ADDRESS_LABEL.search(text or "")
+    """The human-readable address to show on the card, if the post labels one.
+
+    Posts frequently write the label twice — once with a Google Maps link and
+    once with the street ("Adress: https://maps.app.goo.gl/… / Adress: Truong
+    Dang Que"). A URL is not an address a reader can use, so every labelled
+    candidate is considered and URL-only ones are skipped.
+    """
+    for m in _ADDRESS_LABEL.finditer(text or ""):
+        value = re.sub(r"\s+", " ", m.group(1)).strip().strip("-–—•,").strip()
+        # Strip a trailing URL that follows the real address on the same line.
+        value = _MAPS_LINK.sub("", value).strip().strip("-–—•,").strip()
+        if len(value) < 3:
+            continue
+        if value.startswith("#"):          # "Address: #SonTra" is a tag, not an address
+            continue
+        if re.match(r"https?://", value):  # link-only line
+            continue
+        return value
+    return None
+
+
+def find_maps_link(text: str) -> str | None:
+    """A Google Maps link from the post, if it pasted one instead of an address."""
+    m = _MAPS_LINK.search(text or "")
+    return m.group(0) if m else None
+
+
+def coords_from_maps_url(url: str) -> tuple[float, float] | None:
+    """Pull coordinates out of a full Google Maps URL.
+
+    Short maps.app.goo.gl links carry no coordinates and have to be followed
+    first — see scraper/maps_links.py, which does that where there is internet
+    access to spare.
+    """
+    m = _MAPS_COORDS.search(url or "")
     if not m:
         return None
-    value = m.group(1).strip().strip("-–—•").strip()
-    # A label followed by nothing useful ("Address: #SonTra") is not an address.
-    value = re.sub(r"\s+", " ", value)
-    return value if len(value) >= 3 and not value.startswith("#") else None
+    lat, lng = float(m.group(1)), float(m.group(2))
+    if -90 <= lat <= 90 and -180 <= lng <= 180:
+        return lat, lng
+    return None
 
 
 def fallback_coords(city: City, seed: str) -> tuple[float | None, float | None]:

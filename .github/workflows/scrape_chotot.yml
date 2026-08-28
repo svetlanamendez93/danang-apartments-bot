@@ -1,0 +1,40 @@
+name: Scrape Chotot
+
+# Chotot is a website rather than a chat, so it is polled less often than the
+# Telegram channels — its listings do not appear and vanish minute by minute,
+# and each run covers far more ground.
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "Pages per city and category (50 listings each)"
+        required: false
+        default: "4"
+      cities:
+        description: "Comma-separated city keys"
+        required: false
+        default: "da_nang,nha_trang"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Run Chotot scraper
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+        run: |
+          python -m scraper.scrape_chotot \
+            --pages "${{ github.event.inputs.pages || '4' }}" \
+            --cities "${{ github.event.inputs.cities || 'da_nang,nha_trang' }}"

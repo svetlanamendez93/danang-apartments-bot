@@ -182,6 +182,7 @@ function renderMarkers(listings) {
     // address and the map looks simply wrong.
     const approx = listing.location_is_approximate;
     const marker = L.marker([listing.lat, listing.lng], {
+      listingPrice: listing.price_min_usd,
       icon: L.divIcon({
         className: approx ? "price-pin approx" : "price-pin",
         html: `<span>${approx ? "≈" : ""}${escapeHtml(label)}</span>`,
@@ -190,6 +191,38 @@ function renderMarkers(listings) {
     });
     marker.on("click", () => openListing(listing));
     markerLayer.addLayer(marker);
+  });
+}
+
+// Several flats share a building, and everything whose address we could not
+// resolve shares one fallback point, so plain markers stack: only the topmost
+// is clickable and the rest are invisible. Clustering collapses each pile into
+// one badge showing how many are there and the price range inside it, which
+// zooming or clicking expands.
+function makeClusterLayer() {
+  return L.markerClusterGroup({
+    showCoverageOnHover: false,
+    maxClusterRadius: 45,
+    spiderfyOnMaxZoom: true,
+    iconCreateFunction: (cluster) => {
+      const markers = cluster.getAllChildMarkers();
+      const prices = markers
+        .map((m) => m.options.listingPrice)
+        .filter((p) => typeof p === "number");
+      const count = markers.length;
+      let range = "";
+      if (prices.length) {
+        const lo = Math.min(...prices);
+        const hi = Math.max(...prices);
+        range = lo === hi ? `$${Math.round(lo)}` : `$${Math.round(lo)}–${Math.round(hi)}`;
+      }
+      const size = count < 10 ? "sm" : count < 50 ? "md" : "lg";
+      return L.divIcon({
+        className: `price-cluster ${size}`,
+        html: `<div><b>${count}</b>${range ? `<span>${range}</span>` : ""}</div>`,
+        iconSize: null,
+      });
+    },
   });
 }
 
@@ -510,7 +543,7 @@ function init() {
     attribution: "&copy; OpenStreetMap",
     maxZoom: 19,
   }).addTo(map);
-  markerLayer = L.layerGroup().addTo(map);
+  markerLayer = makeClusterLayer().addTo(map);
 
   setLang(LANG);
   applyStaticTranslations();

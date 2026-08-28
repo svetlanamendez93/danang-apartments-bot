@@ -644,3 +644,33 @@ body {
   text-decoration: none;
   font-weight: 600;
 }
+
+
+/* --- marker clusters --- */
+
+.price-cluster > div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  line-height: 1.05;
+  padding: 6px 4px;
+}
+
+.price-cluster b { font-size: 14px; font-weight: 700; }
+.price-cluster span { font-size: 9px; opacity: 0.9; white-space: nowrap; }
+
+.price-cluster.sm > div { min-width: 38px; min-height: 38px; }
+.price-cluster.md > div { min-width: 46px; min-height: 46px; }
+.price-cluster.lg > div { min-width: 56px; min-height: 56px; }
+.price-cluster.lg b { font-size: 16px; }
+
+/* The library ships its own cluster look; ours replaces it entirely. */
+.marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background: none; }
+.marker-cluster-small div, .marker-cluster-medium div, .marker-cluster-large div { background: none; }

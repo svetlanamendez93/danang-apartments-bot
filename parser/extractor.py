@@ -81,6 +81,26 @@ _AREA_PATTERN = re.compile(
     r"(\d{1,4})\s*(?:m2|m²|м2|м²|sqm|кв\.?\s*м)", re.IGNORECASE
 )
 
+# Distance to the sea, which these channels quote constantly and which people
+# genuinely choose on. Written either way round and in metres or kilometres:
+#   "Distance to the sea: less than 700m"   "50 м до пляжа"   "1.5 km to beach"
+_SEA_LABEL = (
+    r"distance\s+to\s+the\s+sea|to\s+the\s+(?:sea|beach)|from\s+the\s+(?:sea|beach)"
+    r"|до\s+(?:мор\w+|пляж\w+)|cách\s+biển"
+)
+# Longest unit first: with "m" ahead of "метр", a Russian "метров" would match only
+# its leading character and lose the rest.
+_SEA_UNIT = r"(км|km|метр\w*|м|m)"
+
+_SEA_AFTER = re.compile(
+    rf"(?:{_SEA_LABEL})\D{{0,18}}?(\d{{1,5}}(?:[.,]\d+)?)\s*{_SEA_UNIT}",
+    re.IGNORECASE,
+)
+_SEA_BEFORE = re.compile(
+    rf"(\d{{1,5}}(?:[.,]\d+)?)\s*{_SEA_UNIT}\s*(?:{_SEA_LABEL})",
+    re.IGNORECASE,
+)
+
 # USD written either way round: "540 USD", "$540", "1,400 USD/month".
 _USD_PATTERNS = [
     re.compile(rf"({_NUM})\s*(?:usd|\$|долл|dollars?)", re.IGNORECASE),
@@ -106,6 +126,7 @@ class ExtractedListing:
     price_min_usd: float | None = None
     price_max_usd: float | None = None
     area_sqm: float | None = None
+    sea_distance_m: int | None = None
     confidence_notes: list[str] = field(default_factory=list)
 
 
@@ -220,6 +241,14 @@ def extract(text: str, default_city: City | None = None) -> ExtractedListing:
     area_match = _AREA_PATTERN.search(text)
     if area_match:
         result.area_sqm = float(area_match.group(1))
+
+    sea_match = _SEA_AFTER.search(text) or _SEA_BEFORE.search(text)
+    if sea_match:
+        value = float(sea_match.group(1).replace(",", "."))
+        metres = value * 1000 if sea_match.group(2).lower() == "km" else value
+        # Beyond ~30km it is not a beach-proximity claim any more.
+        if 0 < metres <= 30_000:
+            result.sea_distance_m = int(metres)
 
     # Prefer USD figures; fall back to converting a VND-only price. Posts that
     # quote both ("37 million VND/month (1,400 USD/month)") should use the USD

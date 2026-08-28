@@ -38,6 +38,7 @@ class SourceType(str, enum.Enum):
     TELEGRAM = "telegram"
     FACEBOOK = "facebook"
     MANUAL = "manual"
+    CHOTOT = "chotot"   # Vietnam's main classifieds site, via its public API
 
 
 class PropertyType(str, enum.Enum):
@@ -158,6 +159,9 @@ class Listing(Base):
     has_pool: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     deposit_text: Mapped[str | None] = mapped_column(String(255), nullable=True)
     min_lease_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Metres to the sea, when the post states it. A decision factor people
+    # actually filter on in these cities, and the channels quote it constantly.
+    sea_distance_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # исходный текст поста, для отладки экстрактора
@@ -260,6 +264,54 @@ class SavedFilter(Base):
             if listing.price_min_usd is None or listing.price_min_usd > self.price_max_usd:
                 return False
         return True
+
+
+class GeocodeCache(Base):
+    """One resolved address, kept so it is never looked up twice.
+
+    Geocoding is the slow, rate-limited part of the pipeline (Nominatim asks for
+    at most one request a second), and the same streets and complexes recur
+    across thousands of listings. Caching turns that from a per-listing cost
+    into a per-distinct-address one.
+
+    A row with lat/lng NULL records a failed lookup, so a hopeless address is
+    not retried on every run.
+    """
+
+    __tablename__ = "geocode_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    query: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lng: Mapped[float | None] = mapped_column(Float, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserListingState(str, enum.Enum):
+    SAVED = "saved"    # shortlisted to come back to
+    VIEWED = "viewed"  # already looked at, dimmed so the list stays scannable
+
+
+class UserListing(Base):
+    """One person's relationship to one listing.
+
+    Strictly per-user: whether Свет has looked at a flat says nothing about
+    anyone else, so this is keyed on the viewer as well as the listing and is
+    never exposed on the public feed.
+    """
+
+    __tablename__ = "user_listings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), index=True)
+    state: Mapped[UserListingState] = mapped_column(Enum(UserListingState))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("telegram_id", "listing_id", "state", name="uq_user_listing_state"),
+    )
 
 
 class RateLimitState(Base):
