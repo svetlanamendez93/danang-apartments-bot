@@ -31,7 +31,8 @@ html, body, #app {
   justify-content: space-between;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  z-index: 5;
+  position: relative;
+  z-index: 1000; /* same reasoning as #filtersPanel — clear Leaflet's internal z-index range */
 }
 
 #topbar button {
@@ -64,7 +65,10 @@ main#map {
   overflow-y: auto;
   transform: translateX(-100%);
   transition: transform 0.2s ease;
-  z-index: 20;
+  /* Leaflet's own panes/controls sit around z-index 400-1000 inside #map;
+     #map has no z-index of its own so those compare directly against this
+     sibling element — has to clear them or the panel renders underneath. */
+  z-index: 1001;
   box-shadow: 2px 0 12px rgba(0, 0, 0, 0.15);
 }
 
@@ -123,7 +127,7 @@ main#map {
   background: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: flex-end;
-  z-index: 30;
+  z-index: 1002; /* same reasoning as #filtersPanel above — must clear Leaflet's own z-index range */
 }
 
 .modal.hidden {
