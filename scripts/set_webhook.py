@@ -9,13 +9,20 @@ Usage (from the project root, inside the virtualenv):
 from __future__ import annotations
 
 import os
+import sys
+
+# Running this file directly (`python scripts/set_webhook.py`) only puts
+# scripts/ on sys.path, not the project root — so `import server` fails with
+# ModuleNotFoundError unless we add the root ourselves first.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from dotenv import load_dotenv
 
 # Explicit path, not just load_dotenv() — dotenv's default cwd-based search
 # only works if this is run from the project root; this way it doesn't matter.
-_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
-load_dotenv(_ENV_PATH)
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
 from server import telegram_api  # noqa: E402 (must import after load_dotenv)
 
