@@ -48,7 +48,7 @@ from db.models import (
 )
 from parser.cleaner import clean_post_text
 from parser.extractor import extract
-from parser.places import find_address_text, find_place
+from parser.places import fallback_coords, find_address_text, find_place
 from server import bot_ui, i18n, quality, ratelimit, telegram_api
 
 logger = logging.getLogger(__name__)
@@ -146,25 +146,6 @@ def parse_posted_at(raw: str | None) -> datetime | None:
     return parsed
 
 
-def fallback_coords(city: City, seed: str) -> tuple[float | None, float | None]:
-    """Approximate coordinates for a listing whose address isn't geocoded yet.
-
-    Straight city-center coordinates would stack every listing of a city on one
-    pixel, where the markers hide each other and only the top one is clickable.
-    A small deterministic offset (~up to 1.5km, derived from the listing's own
-    source URL so it never moves between requests) keeps them individually
-    visible until a moderator sets the real lat/lng.
-    """
-    center = CITY_CENTERS.get(city)
-    if not center:
-        return None, None
-    digest = hashlib.sha256(seed.encode()).digest()
-    # Two independent bytes -> offsets in [-0.0075, +0.0075] degrees.
-    lat_offset = (digest[0] / 255 - 0.5) * 0.015
-    lng_offset = (digest[1] / 255 - 0.5) * 0.015
-    return center[0] + lat_offset, center[1] + lng_offset
-
-
 def coerce_enum(enum_cls, raw: str | None):
     """Map a query-string value onto an enum member, or None if it isn't one.
 
@@ -209,6 +190,7 @@ def listing_to_dict(listing: Listing) -> dict:
         "address_text": listing.address_text,
         "lat": listing.lat,
         "lng": listing.lng,
+        "location_is_approximate": listing.location_is_approximate,
         "price_min_usd": listing.price_min_usd,
         "price_max_usd": listing.price_max_usd,
         "rooms": listing.rooms,
@@ -432,6 +414,7 @@ def ingest():
             listing = Listing(
                 status=status,
                 address_text=address,
+                location_is_approximate=place is None,
                 content_hash=fingerprint,
                 quality_note=verdict.reason,
                 needs_review=verdict.needs_review,
@@ -1060,6 +1043,7 @@ def _create_manual_listing(message: dict, content: str) -> None:
             source_url=source_url,
             city=extracted.city,
             address_text=address,
+            location_is_approximate=place is None,
             lat=lat,
             lng=lng,
             price_min_usd=extracted.price_min_usd,

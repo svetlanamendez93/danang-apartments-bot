@@ -69,15 +69,19 @@ class City(str, enum.Enum):
     OTHER = "other"
 
 
-# Approximate city-center coordinates, used as a fallback marker position when
-# a listing has no precise address geocoded yet (moderators can refine lat/lng
-# via PATCH /admin/listings/<id> once they know the exact building).
+# Where to put a listing whose location could not be identified from its text.
+#
+# These are the districts people actually rent in, not each city's geometric
+# centre: Da Nang's centroid falls in Hòa Cường right beside the airport, so
+# fallback pins were landing on the runway and reading as a broken address
+# parser. A pin here is still a guess — listings placed this way are flagged
+# approximate and drawn differently on the map.
 CITY_CENTERS: dict[City, tuple[float, float]] = {
-    City.DA_NANG: (16.0544, 108.2022),
-    City.NHA_TRANG: (12.2388, 109.1967),
-    City.HO_CHI_MINH: (10.7769, 106.7009),
-    City.HANOI: (21.0278, 105.8342),
-    City.HOI_AN: (15.8801, 108.3380),
+    City.DA_NANG: (16.04953, 108.24439),    # An Thuong, the beachside rental area
+    City.NHA_TRANG: (12.24685, 109.19637),  # Tran Phu, the beach strip
+    City.HO_CHI_MINH: (10.77539, 106.69963),  # District 1
+    City.HANOI: (21.03230, 105.85069),      # Hoan Kiem
+    City.HOI_AN: (15.88280, 108.34289),     # Cam Chau, between the old town and the beach
 }
 
 
@@ -167,6 +171,11 @@ class Listing(Base):
     # (no price, implausibly cheap). Surfaced to admins via /review.
     quality_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # True when lat/lng is a city-area guess rather than a recognised district
+    # or building. Drawn differently on the map, because a precise-looking pin
+    # for an unknown address is worse than an obviously vague one.
+    location_is_approximate: Mapped[bool] = mapped_column(Boolean, default=True)
 
     posted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

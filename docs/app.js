@@ -6,12 +6,15 @@ const tg = window.Telegram?.WebApp;
 tg?.ready();
 tg?.expand();
 
+// Where to centre the map for a city. These are the rental districts, not the
+// geometric centres — Da Nang's centroid sits next to the airport runway.
+// Kept in step with CITY_CENTERS in db/models.py.
 const CITY_CENTERS = {
-  da_nang: [16.0544, 108.2022],
-  nha_trang: [12.2388, 109.1967],
-  ho_chi_minh: [10.7769, 106.7009],
-  hanoi: [21.0278, 105.8342],
-  hoi_an: [15.8801, 108.338],
+  da_nang: [16.04953, 108.24439],
+  nha_trang: [12.24685, 109.19637],
+  ho_chi_minh: [10.77539, 106.69963],
+  hanoi: [21.0323, 105.85069],
+  hoi_an: [15.8828, 108.34289],
 };
 
 let map;
@@ -170,10 +173,14 @@ function renderMarkers(listings) {
   listings.forEach((listing) => {
     if (listing.lat == null || listing.lng == null) return;
     const label = listing.price_min_usd == null ? "?" : "$" + Math.round(listing.price_min_usd);
+    // A pin for a listing whose address we could not identify must not look
+    // like a precise one — otherwise a guessed position reads as a real
+    // address and the map looks simply wrong.
+    const approx = listing.location_is_approximate;
     const marker = L.marker([listing.lat, listing.lng], {
       icon: L.divIcon({
-        className: "price-pin",
-        html: `<span>${escapeHtml(label)}</span>`,
+        className: approx ? "price-pin approx" : "price-pin",
+        html: `<span>${approx ? "≈" : ""}${escapeHtml(label)}</span>`,
         iconSize: null,
       }),
     });
@@ -312,7 +319,7 @@ function renderDetails(listing) {
       }</span>
     </div>
     ${
-      !listing.address_text
+      listing.location_is_approximate
         ? `<div class="d-approx">${t("approx_location")}</div>`
         : ""
     }

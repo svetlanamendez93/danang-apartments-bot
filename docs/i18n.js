@@ -43,9 +43,9 @@ const I18N = {
   description:   { ru: "Описание",          en: "Description",     vi: "Mô tả" },
   user_submitted:{ ru: "от пользователя",   en: "user submitted",  vi: "người dùng gửi" },
   approx_location:{
-    ru: "Точный адрес не указан — метка приблизительная",
-    en: "No exact address given — the pin is approximate",
-    vi: "Chưa có địa chỉ chính xác — ghim chỉ là tương đối",
+    ru: "⚠️ Адрес в объявлении не указан — метка показывает лишь район города",
+    en: "⚠️ The post gives no address — the pin only shows the general area",
+    vi: "⚠️ Bài đăng không có địa chỉ — ghim chỉ cho biết khu vực chung",
   },
   today:         { ru: "сегодня",           en: "today",           vi: "hôm nay" },
   yesterday:     { ru: "вчера",             en: "yesterday",       vi: "hôm qua" },

@@ -17,10 +17,11 @@ the same place is spelled all three ways depending on who wrote the post.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
-from db.models import City
+from db.models import CITY_CENTERS, City
 
 
 @dataclass(frozen=True)
@@ -172,3 +173,21 @@ def find_address_text(text: str) -> str | None:
     # A label followed by nothing useful ("Address: #SonTra") is not an address.
     value = re.sub(r"\s+", " ", value)
     return value if len(value) >= 3 and not value.startswith("#") else None
+
+
+def fallback_coords(city: City, seed: str) -> tuple[float | None, float | None]:
+    """A rough position for a listing whose location could not be identified.
+
+    Placing every such listing on one exact point would stack the markers so
+    only the top one is clickable, so each is nudged by a small deterministic
+    offset (about +/-250m, derived from the listing itself so it never moves
+    between requests). Anything positioned this way is flagged
+    location_is_approximate and drawn differently on the map.
+    """
+    center = CITY_CENTERS.get(city)
+    if not center:
+        return None, None
+    digest = hashlib.sha256(seed.encode()).digest()
+    lat_offset = (digest[0] / 255 - 0.5) * 0.0045
+    lng_offset = (digest[1] / 255 - 0.5) * 0.0045
+    return center[0] + lat_offset, center[1] + lng_offset

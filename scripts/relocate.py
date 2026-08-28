@@ -27,11 +27,12 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
 from db.models import City, Listing, SessionLocal  # noqa: E402
-from parser.places import find_address_text, find_place  # noqa: E402
+from parser.places import fallback_coords, find_address_text, find_place  # noqa: E402
 
 
 def relocate(apply: bool) -> None:
     moved = 0
+    refallback = 0
     unchanged = 0
 
     with SessionLocal() as session:
@@ -42,7 +43,18 @@ def relocate(apply: bool) -> None:
             hint = listing.city if listing.city != City.OTHER else None
             place = find_place(text, hint)
             if not place:
-                unchanged += 1
+                # Still unidentified: re-derive the fallback so listings placed
+                # under an older, worse city-area point move to the current one.
+                new_lat, new_lng = fallback_coords(listing.city, listing.source_url)
+                if new_lat is not None and (listing.lat, listing.lng) != (new_lat, new_lng):
+                    print(f"  #{listing.id:<5} -> approximate {listing.city.value} area "
+                          f"({new_lat:.5f}, {new_lng:.5f})")
+                    if apply:
+                        listing.lat, listing.lng = new_lat, new_lng
+                        listing.location_is_approximate = True
+                    refallback += 1
+                else:
+                    unchanged += 1
                 continue
 
             address = find_address_text(text) or place.name
@@ -60,6 +72,7 @@ def relocate(apply: bool) -> None:
                 listing.address_text = address
                 listing.lat = place.lat
                 listing.lng = place.lng
+                listing.location_is_approximate = False
                 # A post naming a place in one city can't belong to another.
                 if listing.city == City.OTHER:
                     listing.city = place.city
@@ -70,7 +83,7 @@ def relocate(apply: bool) -> None:
 
     verb = "Moved" if apply else "Would move"
     print(f"\n{verb}: {moved}. Left as is: {unchanged}.")
-    if not apply and moved:
+    if not apply and (moved or refallback):
         print("Nothing was written — re-run with --apply.")
 
 

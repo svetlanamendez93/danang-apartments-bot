@@ -124,6 +124,17 @@ body {
   transform: translate(-50%, -50%);
 }
 
+/* Address not identified: hollow and dashed, so it reads as "somewhere in this
+   area" rather than as an exact address. */
+.price-pin.approx span {
+  background: var(--bg);
+  color: var(--hint);
+  border: 1px dashed var(--hint);
+  font-weight: 600;
+  box-shadow: none;
+  opacity: 0.92;
+}
+
 #listView {
   flex: 1;
   min-height: 0;
