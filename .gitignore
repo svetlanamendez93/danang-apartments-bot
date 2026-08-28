@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+*.db
+media/
+parser/media/
+parser/parser_session*
+.venv/
+venv/
+node_modules/
+.claude/
