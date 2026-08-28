@@ -88,6 +88,8 @@ CHANNEL_DEFAULT_CITY: dict[str, City] = {
     "danangrentaflat": City.DA_NANG,
     "onewaydanang": City.DA_NANG,
     "danang_housing": City.DA_NANG,
+    "danangmls": City.DA_NANG,
+    "danang_rent": City.DA_NANG,
     "arenda_nyachang_zhilye": City.NHA_TRANG,
     "viet_life_niachang": City.NHA_TRANG,
     "arenda_nhatrang": City.NHA_TRANG,
