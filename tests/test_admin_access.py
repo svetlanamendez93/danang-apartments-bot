@@ -65,7 +65,7 @@ c.post("/internal/ingest", headers={"X-Ingest-Token": "ingesttok"}, json={
         "message_id": 1, "text": "2BR apartment in Da Nang, 800 USD/month, 70 m2, good condition, "
                                  "parking, elevator, balcony, long term contract.",
         "photo_urls": [], "posted_at": None}]})
-listing_id = c.get("/listings").get_json()[0]["id"]
+listing_id = c.get("/listings").get_json()["items"][0]["id"]
 
 print("=== Admin commands as an outsider ===")
 for cmd in ["/stats", "/review", "/pending", "/spam"]:
@@ -78,9 +78,9 @@ print("\n=== Admin callbacks as an outsider ===")
 out = cb("admin:menu", INTRUDER)
 ok("/stats" not in out, f"admin:menu reveals no admin commands (got: {out[:60]!r})")
 
-before = len(c.get("/listings").get_json())
+before = c.get("/listings").get_json()["total"]
 cb(f"reject:{listing_id}", INTRUDER)
-ok(len(c.get("/listings").get_json()) == before, "outsider cannot reject a live listing")
+ok(c.get("/listings").get_json()["total"] == before, "outsider cannot reject a live listing")
 
 # A pending (user-submitted) listing must not be publishable by an outsider.
 c.post("/bot/webhook", headers=HOOK, json={"update_id": 9, "message": {
@@ -96,7 +96,7 @@ print("\n=== The admin themself still works ===")
 out = send("/stats", ADMIN)
 ok("Статистика" in out, "admin gets /stats")
 cb(f"approve:{pid}", ADMIN)
-ok(any(l["id"] == pid for l in c.get("/listings").get_json()), "admin can approve")
+ok(any(l["id"] == pid for l in c.get("/listings").get_json()["items"]), "admin can approve")
 
 print("\n=== Admin button is not even shown to outsiders ===")
 SENT.clear()
@@ -126,7 +126,7 @@ r = c.post("/bot/webhook", json={"update_id": 1, "callback_query": {
     "id": "x", "from": {"id": ADMIN}, "data": f"reject:{listing_id}",
     "message": {"chat": {"id": ADMIN}, "message_id": 1}}})
 ok(r.status_code == 403, f"no webhook secret -> {r.status_code}")
-ok(len(c.get("/listings").get_json()) >= 1, "forged admin update changed nothing")
+ok(c.get("/listings").get_json()["total"] >= 1, "forged admin update changed nothing")
 
 print()
 if FAILS:
