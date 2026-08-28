@@ -254,8 +254,21 @@ def list_listings():
         if price_max is not None:
             query = query.filter(Listing.price_min_usd <= price_max)
 
+        # Sorting. Listings with no price sort last in both price directions:
+        # they answer neither "cheapest" nor "most expensive", and a NULL
+        # floating to the top of either list is just noise.
+        sort = request.args.get("sort", "newest")
+        orders = {
+            "newest": [Listing.posted_at.desc().nullslast(), Listing.id.desc()],
+            "oldest": [Listing.posted_at.asc().nullsfirst(), Listing.id.asc()],
+            "price_asc": [Listing.price_min_usd.asc().nullslast(), Listing.id.desc()],
+            "price_desc": [Listing.price_min_usd.desc().nullslast(), Listing.id.desc()],
+            "area_desc": [Listing.area_sqm.desc().nullslast(), Listing.id.desc()],
+        }
+        query = query.order_by(*orders.get(sort, orders["newest"]))
+
         limit = min(request.args.get("limit", default=500, type=int), 1000)
-        listings = query.order_by(Listing.posted_at.desc().nullslast()).limit(limit).all()
+        listings = query.limit(limit).all()
         return jsonify([listing_to_dict(l) for l in listings])
 
 

@@ -177,6 +177,22 @@ for qs, expected in cases:
     got = len(c.get(f"/listings?{qs}").get_json())
     ok(got == expected, f"?{qs} -> {got} (expected {expected})")
 
+print("\n=== 8b. Sorting ===")
+prices = lambda qs: [l["price_min_usd"] for l in c.get(f"/listings?{qs}").get_json()]
+asc = prices("sort=price_asc")
+desc = prices("sort=price_desc")
+priced = [p for p in asc if p is not None]
+ok(priced == sorted(priced), f"price_asc ascending: {asc}")
+ok([p for p in desc if p is not None] == sorted(priced, reverse=True), f"price_desc descending: {desc}")
+# A listing with no price answers neither "cheapest" nor "dearest", so it must
+# not float to the top of either ordering.
+ok(all(p is not None for p in asc[:len(priced)]), "unpriced listings sort last, not first")
+ok(len(c.get("/listings?sort=bogus").get_json()) == len(c.get("/listings").get_json()),
+   "an unknown sort falls back instead of erroring")
+areas = [l["area_sqm"] for l in c.get("/listings?sort=area_desc").get_json()]
+known = [a for a in areas if a is not None]
+ok(known == sorted(known, reverse=True), f"area_desc descending: {areas}")
+
 print("\n=== 9. Security ===")
 ok(c.post("/bot/webhook", json={"update_id": 1, "message": {}}).status_code == 403,
    "webhook without the secret -> 403")

@@ -147,6 +147,37 @@ def backfill(pages: int) -> None:
         print()
 
 
+# A t.me preview page holds only a handful of posts (each listing is usually an
+# album of ~10 photos, which Telegram collapses into one block), so a run that
+# read a single page would silently drop everything published beyond it — and
+# last_message_id would then advance past the gap, losing those listings for
+# good. Walk back until we reach what we already have, bounded so a first run
+# against a busy channel can't spiral.
+MAX_CATCHUP_PAGES = 12
+
+
+def collect_new_posts(channel: str, since_id: int) -> list[dict]:
+    """Every post newer than since_id, paging backwards until we catch up."""
+    collected: dict[int, dict] = {}
+    before = None
+
+    for _ in range(MAX_CATCHUP_PAGES):
+        posts = scrape_channel(channel, since_id, before=before)
+        if not posts:
+            break
+        for post in posts:
+            collected[post["message_id"]] = post
+
+        oldest = min(p["message_id"] for p in posts)
+        # The page reached back past what we already have: nothing older to get.
+        if oldest <= since_id + 1:
+            break
+        before = oldest
+        time.sleep(1)  # be polite to t.me
+
+    return sorted(collected.values(), key=lambda p: p["message_id"])
+
+
 def main() -> None:
     if not SOURCE_CHANNELS:
         print("SOURCE_CHANNELS is empty, nothing to do")
@@ -160,12 +191,12 @@ def main() -> None:
         # whole run — the remaining channels are independent of it.
         try:
             since_id = last_ids.get(channel, 0)
-            posts = scrape_channel(channel, since_id)
+            posts = collect_new_posts(channel, since_id)
             if not posts:
                 print(f"[{channel}] no new posts")
                 continue
 
-            print(f"[{channel}] ingested: {ingest(channel, posts)}")
+            print(f"[{channel}] {len(posts)} new post(s) -> {ingest(channel, posts)}")
         except Exception as exc:
             failures += 1
             print(f"[{channel}] FAILED: {type(exc).__name__}: {exc}")

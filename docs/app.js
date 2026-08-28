@@ -20,6 +20,9 @@ const CITY_CENTERS = {
 let map;
 let markerLayer;
 let currentListings = [];
+let currentSort = "newest";
+
+const SORT_OPTIONS = ["newest", "price_asc", "price_desc", "area_desc"];
 // Multi-select state: which values are ticked in each filter group.
 const selected = {
   city: new Set(),
@@ -123,6 +126,7 @@ function currentFilters() {
   const max = document.getElementById("f-price-max").value;
   if (min) params.set("price_min", min);
   if (max) params.set("price_max", max);
+  if (currentSort !== "newest") params.set("sort", currentSort);
   return params;
 }
 
@@ -447,6 +451,18 @@ function applyStaticTranslations() {
   document.getElementById("langCode").textContent = LANG.toUpperCase();
 }
 
+function buildSortSelect() {
+  const sel = document.getElementById("sortSelect");
+  sel.innerHTML = "";
+  SORT_OPTIONS.forEach((key) => {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = t("sort_" + key);
+    opt.selected = key === currentSort;
+    sel.appendChild(opt);
+  });
+}
+
 function buildLangList() {
   const list = document.getElementById("langList");
   list.innerHTML = "";
@@ -461,6 +477,7 @@ function buildLangList() {
       applyStaticTranslations();
       buildChips();
       buildLangList();
+      buildSortSelect();
       renderList(currentListings);
       renderMarkers(currentListings);
       closeSheet("lang");
@@ -499,6 +516,12 @@ function init() {
   applyStaticTranslations();
   buildChips();
   buildLangList();
+  buildSortSelect();
+
+  document.getElementById("sortSelect").onchange = (e) => {
+    currentSort = e.target.value;
+    loadListings();
+  };
 
   document.getElementById("filtersToggle").onclick = () => openSheet("filters");
   document.getElementById("filtersClose").onclick = () => closeSheet("filters");
