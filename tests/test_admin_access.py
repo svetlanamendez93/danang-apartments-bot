@@ -101,12 +101,12 @@ ok(any(l["id"] == pid for l in c.get("/listings").get_json()), "admin can approv
 print("\n=== Admin button is not even shown to outsiders ===")
 SENT.clear()
 send("/start", INTRUDER, mid=30)
-markup = str(SENT[-1][2]) if SENT else ""
+markup = " ".join(str(m) for _, _, m in SENT)
 ok("admin:menu" not in markup, "no Admin button in an outsider's menu")
 
 SENT.clear()
 send("/start", ADMIN, mid=31)
-markup_admin = str(SENT[-1][2]) if SENT else ""
+markup_admin = " ".join(str(m) for _, _, m in SENT)
 ok("admin:menu" in markup_admin, "Admin button present for the admin")
 
 print("\n=== HTTP admin endpoints ===")

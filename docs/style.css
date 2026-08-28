@@ -396,32 +396,108 @@ body {
 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); }
 .dot.active { background: var(--accent); }
 
-.details { padding: 12px 16px 16px; }
-.d-price { font-size: 24px; font-weight: 700; }
-.d-city { color: var(--hint); margin-top: 4px; font-size: 14px; }
-.muted { opacity: 0.7; }
+.details { padding: 16px; }
 
-.d-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
-.d-badges span {
+.d-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.d-price { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+.d-posted { font-size: 12px; color: var(--hint); white-space: nowrap; }
+
+.d-city {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+.d-city .pin { flex-shrink: 0; }
+.d-approx { font-size: 12px; color: var(--hint); margin-top: 3px; padding-left: 22px; }
+
+/* Two-column key/value grid: the facts are what people scan for, so they get
+   their own labelled cells instead of a run-on line of badges. */
+.spec-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.spec {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.spec-icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+.spec-text { min-width: 0; }
+.spec-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--hint);
+}
+.spec-value {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.d-section { margin-top: 18px; }
+.d-section h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--hint);
+  font-weight: 600;
+}
+
+.d-desc {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.55;
+  font-size: 15px;
+}
+
+.source-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+.source-name {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 5px 10px;
-  font-size: 13px;
+  padding: 4px 10px;
 }
-
-.d-desc { white-space: pre-wrap; line-height: 1.5; font-size: 15px; }
-.d-meta { font-size: 13px; color: var(--hint); margin: 4px 0; }
+.source-contact { color: var(--hint); }
 
 .d-warning {
+  display: flex;
+  gap: 8px;
   font-size: 13px;
   line-height: 1.45;
   background: rgba(255, 176, 32, 0.14);
   border: 1px solid rgba(255, 176, 32, 0.4);
-  border-radius: 10px;
-  padding: 10px 12px;
-  margin: 14px 0;
+  border-radius: 12px;
+  padding: 11px 13px;
+  margin: 18px 0 14px;
 }
+.warn-icon { flex-shrink: 0; }
 
 .source-link {
   display: block;

@@ -163,6 +163,11 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_subscribe": {"ru": "🔔 Подписка", "en": "🔔 Alerts", "vi": "🔔 Nhận thông báo"},
     "btn_latest": {"ru": "🆕 Свежие", "en": "🆕 Latest", "vi": "🆕 Mới nhất"},
     "btn_back": {"ru": "⬅️ Назад", "en": "⬅️ Back", "vi": "⬅️ Quay lại"},
+    "menu_hint": {
+        "ru": "Меню всегда внизу — им можно пользоваться в любой момент. 👇",
+        "en": "The menu stays at the bottom — use it any time. 👇",
+        "vi": "Menu luôn ở phía dưới — dùng bất cứ lúc nào. 👇",
+    },
     "btn_more": {"ru": "Показать ещё", "en": "Show more", "vi": "Xem thêm"},
     # --- bot: browsing listings in chat ---
     "latest_intro": {

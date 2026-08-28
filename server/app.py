@@ -46,6 +46,7 @@ from db.models import (
     TgUser,
     init_db,
 )
+from parser.cleaner import clean_post_text
 from parser.extractor import extract
 from server import bot_ui, i18n, quality, ratelimit, telegram_api
 
@@ -439,8 +440,9 @@ def ingest():
                 renovation_quality=extracted.renovation_quality,
                 pets_policy=extracted.pets_policy,
                 area_sqm=extracted.area_sqm,
-                description=post.get("text"),
-                raw_text=post.get("text"),
+                # Cleaned for display; raw_text keeps the post verbatim.
+                description=clean_post_text(text),
+                raw_text=text,
                 posted_at=parse_posted_at(post.get("posted_at")),
             )
             for i, url in enumerate(post.get("photo_urls", [])):
@@ -580,6 +582,14 @@ def _send_main_menu(chat_id: int, lang: str, is_admin_user: bool) -> None:
         f"{i18n.t('welcome_title', lang)}\n\n{i18n.t('welcome_body', lang)}",
         reply_markup=bot_ui.main_menu(lang, WEBAPP_URL, is_admin=is_admin_user),
     )
+    # Sent as a second message because one message can carry only one keyboard,
+    # and the inline menu above and the persistent one below are different
+    # kinds. This one stays on screen for the rest of the conversation.
+    telegram_api.send_message(
+        chat_id,
+        i18n.t("menu_hint", lang),
+        reply_markup=bot_ui.persistent_keyboard(lang, WEBAPP_URL),
+    )
 
 
 def _handle_message(message: dict) -> None:
@@ -602,6 +612,13 @@ def _handle_message(message: dict) -> None:
 
     _remember_user(sender)
     lang = _user_lang(sender)
+
+    # Persistent-keyboard taps arrive as plain text carrying the button label,
+    # so translate a label back into the command it stands for. Matched across
+    # all languages, since an old keyboard may still show the previous ones.
+    button_action = bot_ui.action_for_button(text)
+    if button_action:
+        text = f"/{button_action}"
 
     if text.startswith("/start"):
         _send_main_menu(chat_id, lang, is_admin_user)

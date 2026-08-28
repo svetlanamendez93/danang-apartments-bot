@@ -236,26 +236,117 @@ function openListing(listing) {
     gallery.innerHTML = `<div class="no-photo">${t("no_photo")}</div>`;
   }
 
-  const facts = factsFor(listing);
-  const posted = listing.posted_at
-    ? new Date(listing.posted_at).toLocaleDateString(LANG === "vi" ? "vi-VN" : LANG === "en" ? "en-GB" : "ru-RU")
-    : null;
-
-  document.getElementById("listingDetails").innerHTML = `
-    <div class="d-price">${escapeHtml(priceLabel(listing))}</div>
-    <div class="d-city">📍 ${escapeHtml(optLabel("city", listing.city))}${
-      listing.address_text ? ", " + escapeHtml(listing.address_text) : ""
-    }${listing.lat != null && !listing.address_text ? ` <span class="muted">(${t("no_coords")})</span>` : ""}</div>
-    ${facts.length ? `<div class="d-badges">${facts.map((f) => `<span>${escapeHtml(f)}</span>`).join("")}</div>` : ""}
-    ${listing.description ? `<p class="d-desc">${escapeHtml(listing.description)}</p>` : ""}
-    ${listing.contact ? `<p class="d-meta">${t("contact")}: ${escapeHtml(listing.contact)}</p>` : ""}
-    ${posted ? `<p class="d-meta">${t("posted")}: ${escapeHtml(posted)}</p>` : ""}
-    <p class="d-warning">⚠️ ${t("scam_warning")}</p>
-    <a class="source-link" href="${escapeHtml(listing.source_url)}" target="_blank" rel="noopener">
-      ${t("open_original")} ↗
-    </a>`;
-
+  document.getElementById("listingDetails").innerHTML = renderDetails(listing);
   document.getElementById("listingModal").classList.remove("hidden");
+}
+
+// Structured facts get their own labelled cells rather than a run-on line, so
+// the eye can find "how many rooms" without reading the whole card.
+const SPEC_ICONS = {
+  rooms: "🛏",
+  property_type: "🏠",
+  area_sqm: "📐",
+  renovation_quality: "🛠",
+  pets_policy: "🐾",
+};
+
+function specCells(listing) {
+  const cells = [];
+  if (listing.rooms) {
+    cells.push([SPEC_ICONS.rooms, t("rooms"), optLabel("rooms", listing.rooms)]);
+  }
+  if (listing.property_type) {
+    cells.push([SPEC_ICONS.property_type, t("property_type"), optLabel("property_type", listing.property_type)]);
+  }
+  if (listing.area_sqm) {
+    cells.push([SPEC_ICONS.area_sqm, t("area"), `${Math.round(listing.area_sqm)} m²`]);
+  }
+  if (listing.renovation_quality) {
+    cells.push([SPEC_ICONS.renovation_quality, t("renovation"), optLabel("renovation_quality", listing.renovation_quality)]);
+  }
+  if (listing.pets_policy && listing.pets_policy !== "unknown") {
+    cells.push([SPEC_ICONS.pets_policy, t("pets"), optLabel("pets_policy", listing.pets_policy)]);
+  }
+  return cells;
+}
+
+function relativeDate(iso) {
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  if (days <= 0) return t("today");
+  if (days === 1) return t("yesterday");
+  if (days < 30) return `${days} ${plural(days, t("day_1"), t("day_2"), t("day_5"))} ${t("ago")}`;
+  return new Date(iso).toLocaleDateString(
+    LANG === "vi" ? "vi-VN" : LANG === "en" ? "en-GB" : "ru-RU"
+  );
+}
+
+function renderDetails(listing) {
+  const cells = specCells(listing);
+  const posted = listing.posted_at ? relativeDate(listing.posted_at) : null;
+  const sourceName = { telegram: "Telegram", facebook: "Facebook", manual: t("user_submitted") }[
+    listing.source_type
+  ] || listing.source_type;
+
+  return `
+    <div class="d-head">
+      <div class="d-price">${escapeHtml(priceLabel(listing))}</div>
+      ${posted ? `<div class="d-posted">${escapeHtml(posted)}</div>` : ""}
+    </div>
+
+    <div class="d-city">
+      <span class="pin">📍</span>
+      <span>${escapeHtml(optLabel("city", listing.city))}${
+        listing.address_text ? ", " + escapeHtml(listing.address_text) : ""
+      }</span>
+    </div>
+    ${
+      !listing.address_text
+        ? `<div class="d-approx">${t("approx_location")}</div>`
+        : ""
+    }
+
+    ${
+      cells.length
+        ? `<div class="spec-grid">${cells
+            .map(
+              ([icon, label, value]) => `
+          <div class="spec">
+            <div class="spec-icon">${icon}</div>
+            <div class="spec-text">
+              <div class="spec-label">${escapeHtml(label)}</div>
+              <div class="spec-value">${escapeHtml(value)}</div>
+            </div>
+          </div>`
+            )
+            .join("")}</div>`
+        : ""
+    }
+
+    ${
+      listing.description
+        ? `<div class="d-section">
+             <h3>${t("description")}</h3>
+             <p class="d-desc">${escapeHtml(listing.description)}</p>
+           </div>`
+        : ""
+    }
+
+    <div class="d-section d-source">
+      <h3>${t("source")}</h3>
+      <div class="source-row">
+        <span class="source-name">${escapeHtml(sourceName)}</span>
+        ${listing.contact ? `<span class="source-contact">${escapeHtml(listing.contact)}</span>` : ""}
+      </div>
+    </div>
+
+    <div class="d-warning">
+      <span class="warn-icon">⚠️</span>
+      <span>${t("scam_warning")}</span>
+    </div>
+
+    <a class="source-link" href="${escapeHtml(listing.source_url)}" target="_blank" rel="noopener">
+      ${t("open_original")} <span class="arrow">↗</span>
+    </a>`;
 }
 
 // --- language -----------------------------------------------------------------

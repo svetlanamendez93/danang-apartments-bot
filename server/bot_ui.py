@@ -173,3 +173,55 @@ def listing_buttons(listing: Listing, lang: str) -> dict:
     return {"inline_keyboard": [[
         {"text": misc("open_original", lang), "url": listing.source_url},
     ]]}
+
+
+def persistent_keyboard(lang: str, webapp_url: str) -> dict:
+    """The always-visible keyboard under the message box.
+
+    An inline menu scrolls away with the conversation, so after a few listings
+    there is nothing to press and the bot feels like it has no navigation. A
+    reply keyboard stays put, so the main actions are always one tap away.
+    """
+    return {
+        "keyboard": [
+            [{"text": t("btn_open_map", lang), "web_app": {"url": webapp_url}}],
+            [{"text": t("btn_latest", lang)}, {"text": t("btn_subscribe", lang)}],
+            [{"text": t("btn_submit", lang)}, {"text": t("btn_help", lang)},
+             {"text": t("btn_language", lang)}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+def _all_translations(key: str) -> set[str]:
+    return {v for v in STRINGS_FOR_BUTTONS.get(key, {}).values() if v}
+
+
+# Reply-keyboard buttons arrive as ordinary text, so the handler has to
+# recognise a label in *any* language: a user can switch language while an old
+# keyboard is still on screen, and Telegram will keep sending the old labels.
+from server.i18n import STRINGS as STRINGS_FOR_BUTTONS  # noqa: E402
+
+def _build_button_actions() -> dict[str, str]:
+    # Built in a function rather than a module-level loop: a bare `for _label
+    # in …` at module scope leaks the loop variable and shadowed the _label()
+    # helper above, turning it into a string for every later caller.
+    actions: dict[str, str] = {}
+    for key, action in [
+        ("btn_latest", "latest"),
+        ("btn_subscribe", "subscribe"),
+        ("btn_submit", "submit"),
+        ("btn_help", "help"),
+        ("btn_language", "language"),
+    ]:
+        for text in _all_translations(key):
+            actions[text] = action
+    return actions
+
+
+BUTTON_ACTIONS: dict[str, str] = _build_button_actions()
+
+
+def action_for_button(text: str) -> str | None:
+    return BUTTON_ACTIONS.get(text.strip())

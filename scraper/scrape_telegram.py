@@ -11,8 +11,10 @@ not instant push. Good enough while a home-grown crawler is the free option.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import re
+import time
 
 import requests
 from bs4 import BeautifulSoup
@@ -32,8 +34,17 @@ def fetch_last_message_ids() -> dict[str, int]:
     return {s["channel_username"]: s["last_message_id"] or 0 for s in resp.json()}
 
 
-def scrape_channel(channel: str, since_id: int) -> list[dict]:
-    resp = requests.get(f"https://t.me/s/{channel}", headers=HEADERS, timeout=15)
+def scrape_channel(channel: str, since_id: int, before: int | None = None) -> list[dict]:
+    """Read one page of a channel's public preview.
+
+    `before` walks backwards through history: t.me/s/<channel>?before=<id>
+    returns the page of posts older than that id. Used only for the initial
+    backfill — the scheduled run always reads the newest page.
+    """
+    url = f"https://t.me/s/{channel}"
+    if before:
+        url += f"?before={before}"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
     if resp.status_code != 200:
         print(f"[{channel}] fetch failed: HTTP {resp.status_code}")
         return []
@@ -89,6 +100,48 @@ def scrape_channel(channel: str, since_id: int) -> list[dict]:
     return posts
 
 
+def ingest(channel: str, posts: list[dict]) -> dict:
+    resp = requests.post(
+        f"{API_BASE_URL}/internal/ingest",
+        headers={"X-Ingest-Token": INGEST_TOKEN},
+        json={"channel_username": channel, "posts": posts},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def backfill(pages: int) -> None:
+    """Walk back through each channel's history to fill an empty database.
+
+    A freshly deployed bot only sees posts published from that moment on, so
+    the map stays empty for days. This pulls the recent history in one go —
+    listings older than the TTL are expired by the server anyway, so there is
+    no point going back further than a few pages.
+    """
+    for channel in SOURCE_CHANNELS:
+        before = None
+        total = {"published": 0, "held": 0, "duplicates": 0}
+        for page in range(pages):
+            posts = scrape_channel(channel, since_id=0, before=before)
+            if not posts:
+                print(f"[{channel}] page {page + 1}: no more posts")
+                break
+            try:
+                result = ingest(channel, posts)
+            except Exception as exc:
+                print(f"[{channel}] page {page + 1} ingest FAILED: {exc}")
+                break
+            for key in total:
+                total[key] += result.get(key, 0)
+            print(f"[{channel}] page {page + 1}: {result}")
+            # Continue from the oldest post on this page.
+            before = min(p["message_id"] for p in posts)
+            time.sleep(1)  # be polite to t.me
+        print(f"[{channel}] backfill total: {total}")
+        print()
+
+
 def main() -> None:
     if not SOURCE_CHANNELS:
         print("SOURCE_CHANNELS is empty, nothing to do")
@@ -107,14 +160,7 @@ def main() -> None:
                 print(f"[{channel}] no new posts")
                 continue
 
-            resp = requests.post(
-                f"{API_BASE_URL}/internal/ingest",
-                headers={"X-Ingest-Token": INGEST_TOKEN},
-                json={"channel_username": channel, "posts": posts},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            print(f"[{channel}] ingested: {resp.json()}")
+            print(f"[{channel}] ingested: {ingest(channel, posts)}")
         except Exception as exc:
             failures += 1
             print(f"[{channel}] FAILED: {type(exc).__name__}: {exc}")
@@ -126,4 +172,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Scrape rental listings from Telegram channels")
+    parser.add_argument(
+        "--backfill", type=int, metavar="PAGES",
+        help="walk back PAGES pages of each channel's history instead of only "
+             "reading the newest page (use once, to populate an empty database)",
+    )
+    args = parser.parse_args()
+
+    if args.backfill:
+        backfill(args.backfill)
+    else:
+        main()

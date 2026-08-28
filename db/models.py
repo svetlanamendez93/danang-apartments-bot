@@ -87,6 +87,13 @@ CITY_CENTERS: dict[City, tuple[float, float]] = {
 CHANNEL_DEFAULT_CITY: dict[str, City] = {
     "danangrentaflat": City.DA_NANG,
     "onewaydanang": City.DA_NANG,
+    "danang_housing": City.DA_NANG,
+    "arenda_nyachang_zhilye": City.NHA_TRANG,
+    "viet_life_niachang": City.NHA_TRANG,
+    "arenda_nhatrang": City.NHA_TRANG,
+    "nyachang_arenda_kvartir": City.NHA_TRANG,
+    # Deliberately absent: arenda_vietnam covers the whole country, so a post
+    # that names no city there must stay OTHER rather than be guessed at.
 }
 
 
