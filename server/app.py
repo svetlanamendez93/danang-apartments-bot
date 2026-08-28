@@ -391,17 +391,26 @@ def bot_webhook():
 
     update = request.get_json(force=True)
 
-    if "message" in update:
-        _handle_message(update["message"])
-    elif "callback_query" in update:
-        _handle_callback(update["callback_query"])
+    # Always answer 200, even on an unexpected error: Telegram retries any
+    # update it did not get an OK for, so a bug on one message would otherwise
+    # turn into the same failing update arriving again and again.
+    try:
+        if "message" in update:
+            _handle_message(update["message"])
+        elif "callback_query" in update:
+            _handle_callback(update["callback_query"])
+    except Exception:
+        logger.exception("Failed to handle update %s", update.get("update_id"))
 
     return jsonify({"ok": True})
 
 
 def _handle_message(message: dict) -> None:
+    sender = message.get("from")
+    if not sender:
+        return  # channel posts and some service messages carry no sender
     chat_id = message["chat"]["id"]
-    user_id = message["from"]["id"]
+    user_id = sender["id"]
     text = message.get("text") or message.get("caption") or ""
     is_admin_user = _is_admin(user_id)
 
@@ -540,7 +549,7 @@ def _create_manual_listing(message: dict, content: str) -> None:
     import re
 
     chat_id = message["chat"]["id"]
-    username = message["from"].get("username")
+    username = message.get("from", {}).get("username")
     url_match = re.search(r"https?://\S+", content)
 
     extracted = extract(content)
