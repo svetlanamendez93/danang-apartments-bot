@@ -165,6 +165,31 @@ r = c.post("/internal/ingest", json={"channel_username": "danangrentaflat", "pos
     headers={"X-Ingest-Token": "ingesttok"})
 ok(r.status_code == 200, f"unparseable date + HTML text ingested -> {r.status_code}")
 
+print("\n=== 15. Extractor on real post formats ===")
+from db.models import City
+from parser.extractor import extract
+
+# Thousands separators used to be truncated ($1,400 read as $400) — a wrong
+# price is worse than no price, so this case is pinned.
+e = extract("Price for 1 month: 37 million VND/month (1,400 USD/month)", default_city=City.DA_NANG)
+ok(e.price_min_usd == 1400, f"'1,400 USD' -> {e.price_min_usd} (expected 1400, prefers USD over VND)")
+
+e = extract("Стоимость: 22 млн VND / месяц", default_city=City.DA_NANG)
+ok(e.price_min_usd and 700 < e.price_min_usd < 1000, f"'22 млн VND' -> ${e.price_min_usd} converted")
+
+e = extract("Brand-New 1BR apartment in Khue My. 540 USD/month. 45 m2", default_city=City.DA_NANG)
+ok(e.city == City.DA_NANG, f"district-only post uses channel city -> {e.city.value}")
+ok(e.price_min_usd == 540, f"price -> {e.price_min_usd}")
+ok(e.rooms == "1", f"rooms -> {e.rooms}")
+ok(e.area_sqm == 45, f"area -> {e.area_sqm}")
+
+e = extract("Distance to the sea: less than #700m. Contact +84919289420. 800 USD/month")
+ok(e.price_min_usd == 800, f"hashtag/phone digits not read as price -> {e.price_min_usd}")
+
+e = extract("Студия в Нячанге, 350$ в месяц, можно с питомцами")
+ok(e.rooms == "studio" and e.city == City.NHA_TRANG and e.price_min_usd == 350,
+   f"studio/nha_trang/350 -> {e.rooms}/{e.city.value}/{e.price_min_usd}")
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} CHECK(S) FAILED:")

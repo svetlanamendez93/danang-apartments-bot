@@ -81,6 +81,15 @@ CITY_CENTERS: dict[City, tuple[float, float]] = {
 }
 
 
+# A channel that only ever posts about one city lets us fill in the city for
+# posts that name just a district ("Brand-New 1BR in Khue My"), which is common
+# because the channel's own readers already know which city it covers.
+CHANNEL_DEFAULT_CITY: dict[str, City] = {
+    "danangrentaflat": City.DA_NANG,
+    "onewaydanang": City.DA_NANG,
+}
+
+
 class Source(Base):
     """A monitored Telegram channel / Facebook group."""
 

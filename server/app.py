@@ -27,6 +27,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.exceptions import Forbidden, NotFound
 
 from db.models import (
+    CHANNEL_DEFAULT_CITY,
     CITY_CENTERS,
     City,
     Listing,
@@ -326,7 +327,10 @@ def ingest():
             if exists:
                 continue
 
-            extracted = extract(post.get("text", ""))
+            extracted = extract(
+                post.get("text", ""),
+                default_city=CHANNEL_DEFAULT_CITY.get(channel_username.lower()),
+            )
             fallback_lat, fallback_lng = fallback_coords(extracted.city, source_url)
             listing = Listing(
                 status=ListingStatus.PENDING,
@@ -343,6 +347,7 @@ def ingest():
                 property_type=extracted.property_type,
                 renovation_quality=extracted.renovation_quality,
                 pets_policy=extracted.pets_policy,
+                area_sqm=extracted.area_sqm,
                 description=post.get("text"),
                 raw_text=post.get("text"),
                 posted_at=parse_posted_at(post.get("posted_at")),
@@ -556,6 +561,7 @@ def _create_manual_listing(message: dict, content: str) -> None:
             property_type=extracted.property_type,
             renovation_quality=extracted.renovation_quality,
             pets_policy=extracted.pets_policy,
+            area_sqm=extracted.area_sqm,
             description=content,
             raw_text=content,
             contact=f"@{username}" if username else str(chat_id),
