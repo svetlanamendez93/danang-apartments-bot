@@ -81,6 +81,24 @@ def set_my_commands(commands: list[dict], language_code: str | None = None) -> d
     return _post("setMyCommands", payload)
 
 
+def set_chat_menu_button(text: str, webapp_url: str, chat_id: int | None = None) -> dict | None:
+    """Turn the button beside the message box into "open the map".
+
+    This is the most reachable control Telegram offers — it sits next to the
+    input field and never scrolls away, unlike an inline keyboard. Without a
+    chat_id it sets the default for every user; with one it overrides that for
+    a single chat, which is how each user gets it in their own language.
+    """
+    payload: dict = {"menu_button": {
+        "type": "web_app",
+        "text": text,
+        "web_app": {"url": webapp_url},
+    }}
+    if chat_id is not None:
+        payload["chat_id"] = chat_id
+    return _post("setChatMenuButton", payload)
+
+
 def edit_message_text(chat_id: int, message_id: int, text: str) -> None:
     _post("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text})
 

@@ -45,9 +45,15 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "btn_open_map": {
-        "ru": "🗺 Открыть карту объявлений",
-        "en": "🗺 Open the listings map",
-        "vi": "🗺 Mở bản đồ tin đăng",
+        "ru": "🔎 Найти жильё",
+        "en": "🔎 Find housing",
+        "vi": "🔎 Tìm nhà",
+    },
+    # Shorter still: Telegram truncates the menu button beside the input field.
+    "menu_button": {
+        "ru": "🔎 Найти жильё",
+        "en": "🔎 Find housing",
+        "vi": "🔎 Tìm nhà",
     },
     # Deliberately identical in all three languages. Whoever needs this button
     # is by definition looking at a language they may not read — if the label

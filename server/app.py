@@ -574,6 +574,22 @@ def _set_user_lang(telegram_id: int, lang: str) -> None:
         if user:
             user.lang = lang
             session.commit()
+    # Re-label the button beside the input field in the language just chosen.
+    _sync_menu_button(telegram_id, lang)
+
+
+def _sync_menu_button(chat_id: int, lang: str) -> None:
+    """Point this chat's input-field button at the Mini App, in `lang`.
+
+    Set per chat rather than globally so each user gets their own language;
+    the global default is set once by scripts/set_bot_commands.py.
+    """
+    if not WEBAPP_URL:
+        return
+    try:
+        telegram_api.set_chat_menu_button(i18n.t("menu_button", lang), WEBAPP_URL, chat_id)
+    except Exception:
+        logger.exception("Could not set the chat menu button for %s", chat_id)
 
 
 def _send_main_menu(chat_id: int, lang: str, is_admin_user: bool) -> None:
@@ -621,6 +637,7 @@ def _handle_message(message: dict) -> None:
         text = f"/{button_action}"
 
     if text.startswith("/start"):
+        _sync_menu_button(chat_id, lang)
         _send_main_menu(chat_id, lang, is_admin_user)
         return
 

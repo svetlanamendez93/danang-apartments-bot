@@ -54,3 +54,13 @@ if __name__ == "__main__":
         # Russian doubles as the default list for clients in any other language.
         result = telegram_api.set_my_commands(payload, None if lang == "ru" else lang)
         print(f"{lang}: {result}")
+
+    # The button beside the message box, for anyone who hasn't pressed /start
+    # yet. Per-user language overrides come from the bot itself afterwards.
+    webapp_url = os.environ.get("WEBAPP_URL", "")
+    if webapp_url:
+        from server.i18n import t  # noqa: E402
+
+        print("menu button:", telegram_api.set_chat_menu_button(t("menu_button", "ru"), webapp_url))
+    else:
+        print("WEBAPP_URL is not set — skipping the menu button")
