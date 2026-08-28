@@ -9,6 +9,12 @@ from __future__ import annotations
 import os
 
 from dotenv import load_dotenv
+
+# Must run before any local import: db.models reads DATABASE_URL and
+# server.telegram_api reads BOT_TOKEN at import time, so .env has to already
+# be loaded into os.environ by the time those modules are imported.
+load_dotenv()
+
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.exceptions import Forbidden, NotFound
 
@@ -26,8 +32,6 @@ from db.models import (
 )
 from parser.extractor import extract
 from server import ratelimit, telegram_api
-
-load_dotenv()
 
 ADMIN_API_TOKEN = os.environ.get("ADMIN_API_TOKEN", "")
 INGEST_TOKEN = os.environ.get("INGEST_TOKEN", "")
